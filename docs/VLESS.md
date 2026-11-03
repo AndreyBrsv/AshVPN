@@ -1,6 +1,6 @@
 # VLESS + Reality + XTLS Vision
 
-Available in Ashapp v0.0.3. See the [release downloads and launch instructions](../README.md#download-v003). Native builds and local protocol checks do not establish real-VPS provisioning compatibility.
+Available since Ashapp v0.0.3. See the [release downloads and launch instructions](../README.md#download-v004). Native builds and local protocol checks do not establish real-VPS provisioning compatibility.
 
 ## Setup and device management
 

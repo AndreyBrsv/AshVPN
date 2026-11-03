@@ -15,6 +15,64 @@ spec.loader.exec_module(setup)
 
 
 class ConfiguredSetupTests(unittest.TestCase):
+    def test_active_package_script_has_scoped_bootstrap_and_keeps_vendor_pin(self):
+        original = (ROOT / 'vendor/amneziawg-install.sh').read_bytes()
+        script = setup.package_script(original)
+        self.assertNotIn('apt-key', script)
+        self.assertNotIn('--recv-keys', script)
+        self.assertIn('--prepare-ppa', script)
+        self.assertIn('apt install -y gnupg', script)
+
+    def test_primary_fingerprint_parser_rejects_short_subkey_and_extra_primary(self):
+        def fingerprint(value):
+            return 'fpr:::::::::' + value + ':\n'
+        valid = 'pub::::::::::\n' + fingerprint(setup.PPA_FINGERPRINT)
+        self.assertEqual(setup.primary_fingerprints(valid + 'sub::::::::::\n' + fingerprint('A' * 40)),
+                         [setup.PPA_FINGERPRINT])
+        for metadata in ('pub::::::::::\n' + fingerprint('57290828'), 'pub::::::::::\nsub::::::::::\n',
+                         'sec::::::::::\n' + fingerprint(setup.PPA_FINGERPRINT)):
+            with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                setup.primary_fingerprints(metadata)
+
+    def test_wrong_signing_key_never_changes_apt_trust(self):
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b'public-key-fixture'
+            command = Mock(return_value=SimpleNamespace(stdout='pub::::::::::\nfpr:::::::::' + 'A' * 40 + ':\n'))
+            with self.assertRaisesRegex(ValueError, 'fingerprint mismatch'):
+                setup.prepare_ppa(root, fetch=Mock(return_value=response), command=command)
+            self.assertFalse(list(root.rglob('*')))
+            self.assertEqual(command.call_count, 1)
+
+    def test_public_key_and_both_sources_use_dedicated_keyring(self):
+        from contextlib import nullcontext
+        import os
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b'public-key-fixture'
+            def command(args, **kwargs):
+                if '--dearmor' in args:
+                    Path(args[args.index('--output') + 1]).write_bytes(b'public-keyring-fixture')
+                return SimpleNamespace(stdout='pub::::::::::\nfpr:::::::::' + setup.PPA_FINGERPRINT + ':\n')
+            # Windows has no POSIX fchmod; this case verifies routing/metadata.
+            mode = nullcontext() if hasattr(os, 'fchmod') else patch.object(setup.os, 'fchmod', create=True)
+            with mode:
+                setup.prepare_ppa(root, fetch=Mock(return_value=response), command=command)
+            self.assertEqual((root / 'usr/share/keyrings/ashapp-amnezia.gpg').read_bytes(), b'public-keyring-fixture')
+            text = (root / 'etc/apt/sources.list.d/ashapp-amnezia.list').read_text()
+            self.assertEqual(text.count('[signed-by=/usr/share/keyrings/ashapp-amnezia.gpg]'), 2)
+            self.assertIn('deb-src ', text)
+            # A second, unscoped legacy source must be reviewed before any fetch.
+            (root / 'etc/apt/sources.list.d/legacy.list').write_text('deb ' + setup.PPA_URL + ' focal main\n')
+            fetch = Mock()
+            with self.assertRaisesRegex(ValueError, 'existing Amnezia'):
+                setup.prepare_ppa(root, fetch=fetch, command=command)
+            fetch.assert_not_called()
+
     def test_existing_container_stops_setup_before_package_or_config_changes(self):
         with tempfile.TemporaryDirectory() as folder:
             backend = SimpleNamespace(

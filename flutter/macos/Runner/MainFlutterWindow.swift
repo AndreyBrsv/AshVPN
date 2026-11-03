@@ -1,6 +1,7 @@
 import Cocoa
 import FlutterMacOS
 import Darwin
+import CoreServices
 
 class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
@@ -10,6 +11,44 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    let updates = FlutterMethodChannel(name: "ashapp/app-update",
+                                      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    updates.setMethodCallHandler { call, result in
+      switch call.method {
+      case "info":
+        #if arch(arm64)
+        let target = "macos-arm64"
+        #else
+        let target = "macos-x64"
+        #endif
+        result(["version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+                "target": target])
+      case "openInstaller":
+        guard let args = call.arguments as? [String: Any], let path = args["path"] as? String,
+              let installer = MainFlutterWindow.updateInstaller(path: path),
+              let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.installer") else {
+          result(FlutterError(code: "update_failed", message: "Invalid installer.", details: nil))
+          return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        do { try MainFlutterWindow.quarantineInstaller(installer) } catch {
+          result(FlutterError(code: "update_failed", message: "Could not apply macOS download security policy.", details: nil))
+          return
+        }
+        NSWorkspace.shared.open([installer], withApplicationAt: application, configuration: configuration) { _, error in
+          DispatchQueue.main.async {
+            if error != nil {
+              result(FlutterError(code: "update_failed", message: "Could not open the system installer.", details: nil))
+            } else { result(nil) }
+          }
+        }
+      case "quit":
+        result(nil)
+        DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+      default: result(FlutterMethodNotImplemented)
+      }
+    }
     let exports = FlutterMethodChannel(name: "ashapp/private-export",
                                       binaryMessenger: flutterViewController.engine.binaryMessenger)
     exports.setMethodCallHandler { call, result in
@@ -30,26 +69,119 @@ class MainFlutterWindow: NSWindow {
     super.awakeFromNib()
   }
 
-  static func savePrivateExport(path: String, data: Data) throws {
-    // O_NOFOLLOW prevents following a substituted symlink. Restrict the actual
-    // opened inode before truncation/writing; chmod(path) would have a race.
-    let fd = Darwin.open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK, mode_t(0o600))
-    guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-    defer { Darwin.close(fd) }
+  static func updateInstaller(path: String) -> URL? {
+    guard path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
+    let file = URL(fileURLWithPath: path)
+    let cache = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support/Ashapp/updates", isDirectory: true)
+      .resolvingSymlinksInPath()
     var info = stat()
-    guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
-          fchmod(fd, mode_t(0o600)) == 0, ftruncate(fd, 0) == 0 else {
+    guard file.pathExtension == "pkg", file.deletingLastPathComponent().lastPathComponent.hasPrefix("download-"),
+          file.deletingLastPathComponent().deletingLastPathComponent().resolvingSymlinksInPath() == cache,
+          file.resolvingSymlinksInPath() == file.standardizedFileURL,
+          lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+    return file
+  }
+
+  static func quarantineInstaller(_ file: URL) throws {
+    func currentProperties() throws -> [String: Any]? {
+      var fresh = URL(fileURLWithPath: file.path)
+      fresh.removeAllCachedResourceValues()
+      return try fresh.resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties
+    }
+    // Preserve existing system quarantine and user-approval metadata. Sandbox
+    // may normalize/omit the type, so its exact value is not a security test.
+    if let existing = try currentProperties(), !existing.isEmpty { return }
+    var url = URL(fileURLWithPath: file.path)
+    let properties: [String: Any] = [
+      kLSQuarantineTypeKey as String: kLSQuarantineTypeWebDownload as String,
+      kLSQuarantineOriginURLKey as String: URL(string: "https://github.com/AndreyBrsv/Ashapp/releases/latest")!
+    ]
+    var values = URLResourceValues()
+    values.quarantineProperties = properties
+    try url.setResourceValues(values)
+    guard let applied = try currentProperties(), !applied.isEmpty else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(EPERM))
+    }
+  }
+
+  static func savePrivateExport(path: String, data: Data) throws {
+    guard path.hasPrefix("/"), !path.utf8.contains(0), data.count <= 1024 * 1024 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+    }
+    var original = stat()
+    if lstat(path, &original) == 0 {
+      guard (original.st_mode & S_IFMT) == S_IFREG else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+      }
+    } else if errno != ENOENT {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
-    try data.withUnsafeBytes { buffer in
-      var offset = 0
-      while offset < buffer.count {
-        let count = Darwin.write(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
-        if count < 0 && errno == EINTR { continue }
-        guard count > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-        offset += count
+    let destination = URL(fileURLWithPath: path)
+    let parent = destination.deletingLastPathComponent().resolvingSymlinksInPath()
+    let coordinator = NSFileCoordinator()
+    var coordinationError: NSError?
+    var writingError: Error?
+    // Use a sandbox-aware replacement directory, not an arbitrary sibling of
+    // the file selected in the save panel. Never rewrite an old readable inode.
+    coordinator.coordinate(writingItemAt: destination, options: .forReplacing,
+                           error: &coordinationError) { selected in
+      do {
+        guard selected.lastPathComponent == destination.lastPathComponent,
+              selected.deletingLastPathComponent().resolvingSymlinksInPath() == parent else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+        }
+        func checkDestination() throws {
+          var previous = stat()
+          if lstat(selected.path, &previous) == 0 {
+            guard (previous.st_mode & S_IFMT) == S_IFREG else {
+              throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+            }
+          } else if errno != ENOENT {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+          }
+        }
+        try checkDestination()
+        let manager = FileManager.default
+        let folder = try manager.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                     appropriateFor: selected, create: true)
+        defer { try? manager.removeItem(at: folder) }
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        let staging = folder.appendingPathComponent(UUID().uuidString)
+        let fd = Darwin.open(staging.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                             mode_t(0o600))
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { Darwin.close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == geteuid(), info.st_nlink == 1,
+              let acl = acl_init(0) else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        guard acl_set_fd(fd, acl) == 0, fchmod(fd, mode_t(0o600)) == 0 else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        try data.withUnsafeBytes { buffer in
+          var offset = 0
+          while offset < buffer.count {
+            let count = Darwin.write(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            offset += count
+          }
+        }
+        guard fsync(fd) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        try checkDestination()
+        // Same-volume rename preserves the fresh private inode and its ACL.
+        guard Darwin.rename(staging.path, selected.path) == 0 else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+      } catch {
+        writingError = error
       }
     }
-    guard fsync(fd) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    if let error = coordinationError { throw error }
+    if let error = writingError { throw error }
   }
 }

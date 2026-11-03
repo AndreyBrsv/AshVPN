@@ -3,6 +3,11 @@ import base64
 import copy
 import importlib.util
 import json
+import os
+import stat
+import hashlib
+import io
+import tarfile
 from pathlib import Path
 import subprocess
 import tempfile
@@ -26,10 +31,52 @@ def fixture():
 
 
 class VLESSTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'Requires POSIX permission semantics')
+    def test_binary_and_ancestors_remain_executable_under_private_umask(self):
+        from unittest.mock import MagicMock
+        archive_name = 'sing-box-test-linux-amd64.tar.gz'
+        data = io.BytesIO()
+        binary = b'\x7fELFsynthetic-non-executable-fixture'
+        with tarfile.open(fileobj=data, mode='w:gz') as archive:
+            entry = tarfile.TarInfo('sing-box-test-linux-amd64/sing-box')
+            entry.size = len(binary)
+            archive.addfile(entry, io.BytesIO(binary))
+        payload = data.getvalue()
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        path = self.directory / 'usr-local-lib' / 'ashapp' / 'sing-box'
+        previous = os.umask(0o077)
+        try:
+            with patch.object(vless, 'BINARY', path), patch.object(vless.platform, 'machine', return_value='x86_64'), \
+                    patch.dict(vless.RELEASES, {'x86_64': (archive_name, hashlib.sha256(payload).hexdigest())}), \
+                    patch.object(vless.urllib.request, 'urlopen', return_value=response):
+                vless.install_binary()
+            self.assertEqual(path.read_bytes(), binary)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(path.parent.parent.stat().st_mode), 0o755)
+        finally:
+            os.umask(previous)
+
+    @unittest.skipIf(os.name == 'nt', 'Requires POSIX permission semantics')
+    def test_restrictive_umask_keeps_new_service_ancestors_traversable(self):
+        mask = os.umask(0o077)
+        try:
+            parent = self.directory / 'new-ancestor' / 'bin'
+            vless.public_directory(parent)
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(parent.parent.stat().st_mode), 0o755)
+            self.install_fresh()
+            self.assertEqual(stat.S_IMODE(self.manager.directory.stat().st_mode), 0o750)
+        finally:
+            os.umask(mask)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
+        # Model a traversable system ancestor, not a private user temp root.
+        self.directory.chmod(0o755)
         self.calls, self.writes = [], []
         self.active = True
         self.failed_restart = False
@@ -38,6 +85,19 @@ class VLESSTests(unittest.TestCase):
         self.original = fixture()
         self.manager.state_path.write_text(vless.encoded(self.original))
         self.manager.config_path.write_text(vless.encoded(vless.server_config(self.original)))
+
+    @unittest.skipIf(os.name == 'nt', 'Requires POSIX permission semantics')
+    def test_old_private_service_ancestor_is_refused_without_widening_or_install(self):
+        from unittest.mock import Mock
+        private = self.directory / 'old-private-parent'
+        private.mkdir(mode=0o700)
+        manager = vless.VlessManager(private / 'vless', self.command, self.write, self.directory / 'new-unit')
+        with patch.object(vless, 'install_binary') as install, patch.object(vless, 'probe_target') as probe:
+            with self.assertRaisesRegex(RuntimeError, 'existing private'):
+                manager.install('203.0.113.10', 24443, 'www.microsoft.com', 'chrome')
+            install.assert_not_called()
+            probe.assert_not_called()
+        self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
 
     def write(self, path, content, mode=0o600):
         self.writes.append((path, mode))

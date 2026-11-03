@@ -147,6 +147,10 @@ ssh_config() {
     field user; field root_mode
     username_ok "$user" || fatal 'Invalid username.'
     [[ "$root_mode" == keep || "$root_mode" == no ]] || fatal 'Invalid root SSH mode.'
+    # One sshd -T -C address cannot prove a global denial across Match rules.
+    if [[ "$root_mode" == no ]]; then
+        ssh_policy_without_match /etc/ssh/sshd_config || fatal 'Root SSH was not changed. Conditional (Match) or unsupported SSH policy needs manual review.'
+    fi
     timestamp="$(date +%Y%m%d-%H%M%S-%N)"
     SSH_BACKUP="/etc/ssh/sshd_config.bak.$timestamp"
     cp -a -- /etc/ssh/sshd_config "$SSH_BACKUP"
@@ -183,6 +187,66 @@ ssh_config() {
     systemctl reload ssh || systemctl reload sshd
     SSH_CHANGED=0
     ok 'SSH validated and reloaded. Current session preserved.'
+}
+
+ssh_policy_without_match() {
+    python3 - "$1" <<'SSH_POLICY'
+import glob
+import re
+import shlex
+import sys
+from pathlib import Path
+
+def check_config(path, base=Path('/etc/ssh'), stack=(), budget=None):
+    if budget is None:
+        budget = [0, 0]
+    path = Path(path).resolve(strict=True)
+    if path in stack or len(stack) >= 16:
+        raise ValueError('Cyclic or excessively nested SSH Includes.')
+    budget[0] += 1
+    content = path.read_bytes()
+    budget[1] += len(content)
+    if budget[0] > 128 or budget[1] > 4 * 1024 * 1024:
+        raise ValueError('SSH policy exceeds review limits.')
+    for line in content.decode('utf-8').splitlines():
+        tokens = shlex.split(line, comments=True, posix=True)
+        if not tokens:
+            continue
+        keyword, equal, attached = tokens.pop(0).partition('=')
+        keyword = keyword.lower()
+        if equal and attached:
+            tokens.insert(0, attached)
+        elif not equal and tokens and tokens[0].startswith('='):
+            value = tokens.pop(0)[1:]
+            if value:
+                tokens.insert(0, value)
+        if keyword == 'match':
+            raise ValueError('Conditional SSH policy requires manual review.')
+        if keyword != 'include':
+            continue
+        if not tokens:
+            raise ValueError('Empty SSH Include.')
+        for value in tokens:
+            # sshd/libc glob and Python glob differ for bracket classes and
+            # extensions. Refuse them rather than treating an unmatched pattern
+            # as proof that no conditional policy exists.
+            if any(c in value for c in ('~', '$', '%', '\\', '\x00', '[', ']', '{', '}')):
+                raise ValueError('Unsupported SSH Include syntax.')
+            target = Path(value)
+            if not target.is_absolute():
+                target = base / target
+            matches = sorted(glob.glob(str(target)))
+            if not matches and not glob.has_magic(str(target)):
+                raise ValueError('Missing SSH Include.')
+            for child in matches:
+                check_config(child, base, (*stack, path), budget)
+
+if __name__ == '__main__':
+    try:
+        check_config(sys.argv[1])
+    except (OSError, ValueError):
+        raise SystemExit(1)
+SSH_POLICY
 }
 
 icmp() {

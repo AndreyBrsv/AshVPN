@@ -13,6 +13,7 @@ import platform
 import re
 import secrets
 import socket
+import stat
 import ssl
 import subprocess
 import sys
@@ -171,6 +172,29 @@ def probe_target(sni):
     raise ValueError('Reality target could not be verified with TLS 1.3 and HTTP/2 from this server. Choose another SNI or check its network.')
 
 
+def existing_public_directory(path):
+    if path.is_symlink() or (path.exists() and
+            (not path.is_dir() or not path.stat().st_mode & stat.S_IXOTH)):
+        raise RuntimeError('The VLESS service cannot traverse an existing private or linked parent directory. Review its ownership and permissions before retrying; existing permissions were not widened.')
+
+
+def public_directory(path):
+    """Make newly created non-secret service ancestors traversable under umask077."""
+    existing_public_directory(path)
+    missing = []
+    current = path
+    while not current.exists():
+        if current.is_symlink():
+            raise RuntimeError('Unsafe VLESS directory.')
+        missing.append(current)
+        current = current.parent
+    if current.is_symlink() or not current.is_dir():
+        raise RuntimeError('Unsafe VLESS directory.')
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+
+
 def install_binary():
     machine = platform.machine()
     if machine not in RELEASES:
@@ -188,12 +212,13 @@ def install_binary():
         binary = bundle.extractfile(entry).read()
     if not binary.startswith(b'\x7fELF'):
         raise RuntimeError('Invalid VLESS binary.')
-    BINARY.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    public_directory(BINARY.parent)
     if BINARY.parent.is_symlink() or BINARY.exists() or BINARY.is_symlink():
         raise RuntimeError('The dedicated VLESS binary path is already occupied.')
     fd = os.open(BINARY, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
     try:
         with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), 0o755)
             output.write(binary)
     except Exception:
         BINARY.unlink(missing_ok=True)
@@ -356,6 +381,8 @@ class VlessManager:
             return {'preserved': True, **self.status()}
         if self.directory.exists() or self.directory.is_symlink() or self.unit.exists() or self.unit.is_symlink() or BINARY.exists() or BINARY.is_symlink() or FIREWALL.exists() or FIREWALL.is_symlink():
             raise RuntimeError('Dedicated VLESS paths are occupied. Existing installations will not be replaced.')
+        existing_public_directory(self.directory.parent)
+        existing_public_directory(BINARY.parent)
         try:
             with socket.socket() as probe:
                 probe.bind(('0.0.0.0', port))
@@ -376,9 +403,11 @@ class VlessManager:
             created_binary = True
             if account.returncode != 0:
                 self.command(['useradd', '--system', '--user-group', '--no-create-home', '--shell', '/usr/sbin/nologin', USER])
-            self.directory.mkdir(parents=True, mode=0o750)
+            public_directory(self.directory.parent)
+            self.directory.mkdir(mode=0o750)
             directory_created = True
             self.command(['chown', 'root:' + USER, str(self.directory)])
+            self.directory.chmod(0o750)
             generated = self.command([str(BINARY), 'generate', 'reality-keypair']).stdout
             values = dict(re.findall(r'(?m)^(PrivateKey|Password|PublicKey|Private key|Public key):\s*(\S+)\s*$', generated))
             private = values.get('PrivateKey') or values.get('Private key')

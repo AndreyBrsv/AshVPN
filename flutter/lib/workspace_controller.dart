@@ -47,6 +47,7 @@ class WorkspaceController extends ChangeNotifier {
 
   /// The owning workspace reserves an endpoint before authentication starts.
   void Function(ConnectionDetails)? beforeConnect;
+  bool Function()? canStartOperation;
   List<ServerProfile> profiles = [];
   List<ServerTemplate> templates = [];
   ConnectionDetails? ssh, socks, savedAccount;
@@ -85,6 +86,11 @@ class WorkspaceController extends ChangeNotifier {
 
   Future<bool> _guard(Future<void> Function() body) async {
     if (busy || _disposed) return false;
+    if (canStartOperation?.call() == false) {
+      error = 'An app update is starting. Server operations are paused.';
+      _notify();
+      return false;
+    }
     busy = true;
     error = '';
     _notify();

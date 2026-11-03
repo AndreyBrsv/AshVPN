@@ -10,8 +10,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from build_installers import build_installer
+
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.0.3'
+VERSION = '0.0.4'
 FLUTTER_VERSION = '3.47.9'
 FLUTTER_REVISION = 'c197ca5199'
 
@@ -63,6 +65,9 @@ def package(target, output):
                     raise ValueError(f'An embedded native dependency lacks {required}: {item.name}')
         # Keep the ad-hoc signature's default code-hash requirement. An
         # identifier-only requirement would let unrelated code impersonate us.
+        resources = bundle / 'Contents/Resources'
+        shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
+        shutil.copy2(ROOT / 'vendor/LICENSE.Varckin', resources / 'LICENSE.Varckin')
         subprocess.run(['codesign', '--force', '--deep', '--sign', '-',
                         '--identifier', 'io.github.andreybrsv.ashapp',
                         '--entitlements', str(ROOT / 'flutter/macos/Runner/Release.entitlements'),
@@ -76,12 +81,15 @@ def package(target, output):
             shutil.copy2(ROOT / 'vendor/LICENSE.Varckin', payload / 'LICENSE.Varckin')
             subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent',
                             str(payload), str(archive)], check=True)
+    installer = build_installer(ROOT, target, VERSION, output)
     manifest = {'version': VERSION, 'source_commit': revision, 'target': target,
                 'build_host_arch': platform.machine(), 'test_host_arch': platform.machine(),
                 'flutter': sdk['frameworkVersion'], 'flutter_revision': sdk['frameworkRevision'],
                 'dart': sdk['dartSdkVersion'], 'pubspec_lock_sha256': sha256(ROOT / 'flutter/pubspec.lock'),
                 'vendor_sha256': sha256(ROOT / 'vendor/amneziawg-install.sh'),
                 'archive': archive.name, 'sha256': sha256(archive),
+                'installer': installer.name, 'installer_sha256': sha256(installer),
+                'installer_size': installer.stat().st_size,
                 'run_url': (f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
                             f"{os.environ['GITHUB_RUN_ID']}" if 'GITHUB_RUN_ID' in os.environ else None)}
     (output / f'{stem}.build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')

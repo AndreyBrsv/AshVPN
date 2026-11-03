@@ -71,10 +71,14 @@ host_keys.json*
 *.dmg
 *.exe
 *.msi
+*.pkg
+update-settings.json*
+updates/
 *.app/
 *.dSYM/
 .codex/
 .agents/
+.serena/
 .vscode/
 release-output/
 artifacts/

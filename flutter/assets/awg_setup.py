@@ -14,22 +14,120 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
+import urllib.request
 from pathlib import Path
 
 PIN = '10c9ef9b3b4e9ee4838c06fb8fe89a512a65149f68830dc87fe90f437d2accd4'
+PPA_FINGERPRINT = '75C9DD72C799870E310542E24166F2C257290828'
+PPA_URL = 'https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu'
+
+
+def primary_fingerprints(metadata):
+    """Select primary fingerprints, never a short ID or a subkey fingerprint."""
+    result, awaiting = [], False
+    for line in metadata.splitlines():
+        fields = line.split(':')
+        if fields[0] in ('pub', 'sec'):
+            if awaiting or fields[0] == 'sec':
+                raise ValueError('Invalid package signing key metadata.')
+            awaiting = True
+        elif fields[0] == 'sub':
+            if awaiting:
+                raise ValueError('Missing primary signing fingerprint.')
+        elif fields[0] == 'fpr' and awaiting:
+            if len(fields) <= 9 or not re.fullmatch('[A-F0-9]{40}', fields[9]):
+                raise ValueError('Invalid package signing fingerprint.')
+            result.append(fields[9])
+            awaiting = False
+    if awaiting:
+        raise ValueError('Missing primary signing fingerprint.')
+    return result
+
+
+def prepare_ppa(root=Path('/'), fetch=urllib.request.urlopen, command=subprocess.run):
+    """Install public, repository-scoped trust after checking the pinned identity."""
+    keyring = root / 'usr/share/keyrings/ashapp-amnezia.gpg'
+    sources = root / 'etc/apt/sources.list.d'
+    source = sources / 'ashapp-amnezia.list'
+    content = ''.join(f'{kind} [signed-by=/usr/share/keyrings/ashapp-amnezia.gpg] {PPA_URL} focal main\n'
+                      for kind in ('deb', 'deb-src'))
+    candidates = [root / 'etc/apt/sources.list', *sources.glob('*.list'), *sources.glob('*.sources')]
+    for path in candidates:
+        if not path.exists():
+            continue
+        if path.is_symlink():
+            raise ValueError('Review linked APT sources before adding package trust.')
+        text = path.read_text(encoding='utf-8')
+        if path == source and text == content:
+            continue
+        if path == source:
+            raise ValueError('The dedicated Amnezia APT source is occupied. Review it before setup.')
+        if any('ppa.launchpadcontent.net/amnezia/ppa' in line.split('#', 1)[0]
+               or 'ppa.launchpad.net/amnezia/ppa' in line.split('#', 1)[0]
+               for line in text.splitlines()):
+            raise ValueError('Review existing Amnezia APT sources before adding scoped package trust.')
+    with tempfile.TemporaryDirectory(prefix='ashapp-apt-') as folder:
+        temporary = Path(folder)
+        armored, binary = temporary / 'key.asc', temporary / 'key.gpg'
+        url = f'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x{PPA_FINGERPRINT}'
+        with fetch(url, timeout=30) as response:
+            data = response.read(1024 * 1024 + 1)
+        if not data or len(data) > 1024 * 1024:
+            raise ValueError('Invalid package signing key size.')
+        armored.write_bytes(data)
+        base = ['gpg', '--no-options', '--batch', '--homedir', str(temporary)]
+        result = command([*base, '--with-colons', '--show-keys', str(armored)],
+                         check=True, capture_output=True, text=True, timeout=30)
+        if primary_fingerprints(result.stdout) != [PPA_FINGERPRINT]:
+            raise ValueError('Package signing key fingerprint mismatch. APT trust was not changed.')
+        command([*base, '--dearmor', '--output', str(binary), str(armored)],
+                check=True, capture_output=True, text=True, timeout=30)
+        for path, payload in ((keyring, binary.read_bytes()), (source, content.encode())):
+            if path.is_symlink():
+                raise ValueError('Unsafe package trust destination.')
+            missing = []
+            parent = path.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            for parent in reversed(missing):
+                parent.mkdir(mode=0o755)
+                parent.chmod(0o755)
+            fd, name = tempfile.mkstemp(prefix='.ashapp-apt-', dir=path.parent)
+            try:
+                with os.fdopen(fd, 'wb') as output:
+                    os.fchmod(output.fileno(), 0o644)
+                    output.write(payload)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(name, path)
+            finally:
+                Path(name).unlink(missing_ok=True)
 
 
 def package_script(original):
     if hashlib.sha256(original).hexdigest() != PIN:
         raise ValueError('The pinned installer checksum does not match.')
     source = original.decode('utf-8')
+    # Preserve the vendor pin while replacing its unsafe Debian trust bootstrap.
+    unsafe = ('\t\tapt-key adv --keyserver keyserver.ubuntu.com --recv-keys 57290828\n'
+              '\t\techo "deb https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" >>/etc/apt/sources.list.d/amneziawg.sources.list\n'
+              '\t\techo "deb-src https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" >>/etc/apt/sources.list.d/amneziawg.sources.list\n')
+    if source.count(unsafe) != 1:
+        raise ValueError('The reviewed Debian package routine changed.')
+    helper = str(Path(__file__).resolve())
+    import shlex
+    source = source.replace(unsafe, '\t\tapt install -y gnupg\n\t\tpython3 ' + shlex.quote(helper) + ' --prepare-ppa\n')
     declarations, tail = source.split('# Check for root, virt, OS...\n', 1)
     start = declarations.index('\t# Install AmneziaWG tools and module\n',
                                declarations.index('function installAmneziaWG() {'))
     end = declarations.index('\n\tSERVER_AWG_CONF=', start)
     body = declarations[start:end]
     # Replace question/config/client functions by invoking the package body only.
-    return ('set -Eeuo pipefail\numask 077\n' + declarations +
+    # Exclude inactive vendor management functions from the executed adapter.
+    prelude = declarations[:declarations.index('function installAmneziaWG() {')]
+    return ('set -Eeuo pipefail\numask 077\n' + prelude +
             '\nfunction installAmneziaWG() {\n' + body +
             '\n}\nfunction apt() { command apt -o Dpkg::Options::=--force-confold "$@"; }\n'
             'initialCheck\ninstallAmneziaWG\n')
@@ -97,9 +195,14 @@ def activate_configuration(clients, directory, params, config,
         raise
 
 
-def main():
+def main(arguments=()):
     if os.geteuid() != 0:
         raise ValueError('Kernel setup requires root.')
+    if list(arguments) == ['--prepare-ppa']:
+        prepare_ppa()
+        return
+    if arguments:
+        raise ValueError('Unknown kernel setup operation.')
     base = Path(__file__).resolve().parent
     spec = importlib.util.spec_from_file_location('clients', base / 'clients.py')
     clients = importlib.util.module_from_spec(spec)
@@ -151,7 +254,7 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        main(sys.argv[1:])
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError, RuntimeError) as error:
         # Never print configs, private keys, command input or package command output.
         print('ERROR: configured kernel setup failed: ' + str(error) if not isinstance(error, subprocess.CalledProcessError)

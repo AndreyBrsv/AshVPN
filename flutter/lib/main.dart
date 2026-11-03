@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 
 import 'connection_details.dart';
+import 'app_update.dart';
+import 'app_update_dialog.dart';
+import 'json_file_store.dart';
 import 'create_client_dialog.dart';
 import 'import_client_dialog.dart';
 import 'credential_vault.dart';
@@ -89,6 +92,7 @@ class HomePage extends StatefulWidget {
     this.profiles,
     this.templates,
     this.vault,
+    this.updates,
   });
   final WorkspaceController? controller;
   final SshConnector connector;
@@ -96,16 +100,18 @@ class HomePage extends StatefulWidget {
   final ServerProfiles? profiles;
   final TemplateRepository? templates;
   final CredentialVault? vault;
+  final AppUpdateController? updates;
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
   late final ServerWorkspace workspace;
+  late final AppUpdateController updates;
   WorkspaceController get vm => workspace.current;
   int page = 0;
   bool opening = false;
-  bool get busy => vm.busy || opening;
+  bool get busy => vm.busy || opening || updates.locksWorkspace;
   @override
   void initState() {
     super.initState();
@@ -128,13 +134,52 @@ class _HomePageState extends State<HomePage> {
         );
     workspace = ServerWorkspace(initial);
     initial.initialize();
+    updates =
+        widget.updates ??
+        AppUpdateController(
+          repository: UpdateRepository(
+            transport: GitHubUpdateTransport(),
+            cache: Directory(path.join(appDataDirectory().path, 'updates')),
+          ),
+          runtime: NativeUpdateRuntime(),
+          preferences: JsonFileStore(
+            File(path.join(appDataDirectory().path, 'update-settings.json')),
+          ),
+        );
+    // Injected workspace tests do not make live update requests.
+    updates.addListener(updateOperationGate);
+    if (widget.updates != null || widget.controller == null) updates.start();
   }
 
   @override
   void dispose() {
+    updates.removeListener(updateOperationGate);
+    if (widget.updates == null) updates.dispose();
     workspace.dispose();
     workspace.closeSessions(preserve: widget.controller);
     super.dispose();
+  }
+
+  bool get canInstallUpdate =>
+      !opening && workspace.sessions.every((session) => !session.busy);
+
+  void updateOperationGate() {
+    workspace.operationsSuspended = updates.locksWorkspace;
+  }
+
+  Future<void> showUpdates() => showDialog<void>(
+    context: context,
+    builder: (_) => AppUpdateDialog(
+      controller: updates,
+      workspace: workspace,
+      canInstall: () => canInstallUpdate,
+    ),
+  );
+
+  Future<void> checkForUpdates() async {
+    final dialog = showUpdates();
+    await updates.check();
+    await dialog;
   }
 
   Future<void> connect([ServerProfile? profile]) async {
@@ -1059,7 +1104,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: workspace,
+    listenable: Listenable.merge([workspace, updates]),
     builder: (context, _) {
       final compact = MediaQuery.sizeOf(context).width < 760;
       final pages = [
@@ -1083,130 +1128,158 @@ class _HomePageState extends State<HomePage> {
         'VPN clients',
         'Credentials',
       ];
-      return Scaffold(
-        appBar: AppBar(
-          title: Text(
-            vm.connected ? 'Ashapp · ${vm.ssh!.host}' : 'Ashapp',
-            overflow: TextOverflow.ellipsis,
-          ),
-          actions: [
-            PopupMenuButton<WorkspaceController>(
-              tooltip: 'Switch server',
-              enabled: !opening,
-              icon: const Icon(Icons.dns_outlined),
-              onSelected: (target) async {
-                workspace.select(target);
-                if (!target.busy) await target.initialize();
-              },
-              itemBuilder: (_) => [
-                for (final target in workspace.sessions)
-                  if (target.ssh != null)
-                    PopupMenuItem(
-                      value: target,
-                      child: Text(
-                        '${target.ssh!.host}:${target.ssh!.port} · ${target.busy
-                            ? "Working"
-                            : target.connected
-                            ? "Connected"
-                            : "Disconnected"}',
-                      ),
-                    ),
-              ],
+      return AbsorbPointer(
+        absorbing: updates.locksWorkspace,
+        child: Scaffold(
+          appBar: AppBar(
+            title: Text(
+              vm.connected ? 'Ashapp · ${vm.ssh!.host}' : 'Ashapp',
+              overflow: TextOverflow.ellipsis,
             ),
-            if (vm.connected)
-              TextButton(
-                onPressed: busy ? null : () => vm.disconnect(),
-                child: const Text('Disconnect'),
-              ),
-            const SizedBox(width: 16),
-          ],
-        ),
-        bottomNavigationBar: compact
-            ? NavigationBar(
-                selectedIndex: page,
-                labelBehavior:
-                    NavigationDestinationLabelBehavior.onlyShowSelected,
-                onDestinationSelected: (v) => setState(() => page = v),
-                destinations: [
-                  for (var i = 0; i < labels.length; i++)
-                    NavigationDestination(
-                      icon: Icon(icons[i]),
-                      label: labels[i],
+            actions: [
+              if (compact)
+                IconButton(
+                  tooltip: 'Check for updates',
+                  onPressed: checkForUpdates,
+                  icon: Badge(
+                    isLabelVisible: updates.release != null,
+                    child: const Icon(Icons.system_update_outlined),
+                  ),
+                )
+              else
+                Tooltip(
+                  message: 'Check for updates',
+                  child: TextButton.icon(
+                    onPressed: checkForUpdates,
+                    icon: Badge(
+                      isLabelVisible: updates.release != null,
+                      child: const Icon(Icons.system_update_outlined),
                     ),
+                    label: Text(
+                      updates.release == null
+                          ? 'Check for updates'
+                          : 'Update available',
+                    ),
+                  ),
+                ),
+              PopupMenuButton<WorkspaceController>(
+                tooltip: 'Switch server',
+                enabled: !opening,
+                icon: const Icon(Icons.dns_outlined),
+                onSelected: (target) async {
+                  workspace.select(target);
+                  if (!target.busy) await target.initialize();
+                },
+                itemBuilder: (_) => [
+                  for (final target in workspace.sessions)
+                    if (target.ssh != null)
+                      PopupMenuItem(
+                        value: target,
+                        child: Text(
+                          '${target.ssh!.host}:${target.ssh!.port} · ${target.busy
+                              ? "Working"
+                              : target.connected
+                              ? "Connected"
+                              : "Disconnected"}',
+                        ),
+                      ),
                 ],
-              )
-            : null,
-        body: SafeArea(
-          child: Row(
-            children: [
-              if (!compact)
-                NavigationRail(
-                  extended: MediaQuery.sizeOf(context).width >= 1100,
+              ),
+              if (vm.connected)
+                TextButton(
+                  onPressed: busy ? null : () => vm.disconnect(),
+                  child: const Text('Disconnect'),
+                ),
+              const SizedBox(width: 16),
+            ],
+          ),
+          bottomNavigationBar: compact
+              ? NavigationBar(
                   selectedIndex: page,
+                  labelBehavior:
+                      NavigationDestinationLabelBehavior.onlyShowSelected,
                   onDestinationSelected: (v) => setState(() => page = v),
                   destinations: [
                     for (var i = 0; i < labels.length; i++)
-                      NavigationRailDestination(
+                      NavigationDestination(
                         icon: Icon(icons[i]),
-                        label: Text(labels[i]),
+                        label: labels[i],
                       ),
                   ],
-                ),
-              Expanded(
-                child: Column(
-                  children: [
-                    if (vm.busy) const LinearProgressIndicator(),
-                    if (vm.error.isNotEmpty)
-                      Material(
-                        color: Theme.of(context).colorScheme.errorContainer,
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Semantics(
-                            liveRegion: true,
-                            child: Row(
-                              children: [
-                                const Icon(Icons.error_outline),
-                                const SizedBox(width: 12),
-                                Expanded(child: Text(vm.error)),
-                              ],
+                )
+              : null,
+          body: SafeArea(
+            child: Row(
+              children: [
+                if (!compact)
+                  NavigationRail(
+                    extended: MediaQuery.sizeOf(context).width >= 1100,
+                    selectedIndex: page,
+                    onDestinationSelected: (v) => setState(() => page = v),
+                    destinations: [
+                      for (var i = 0; i < labels.length; i++)
+                        NavigationRailDestination(
+                          icon: Icon(icons[i]),
+                          label: Text(labels[i]),
+                        ),
+                    ],
+                  ),
+                Expanded(
+                  child: Column(
+                    children: [
+                      if (vm.busy) const LinearProgressIndicator(),
+                      if (vm.error.isNotEmpty)
+                        Material(
+                          color: Theme.of(context).colorScheme.errorContainer,
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Semantics(
+                              liveRegion: true,
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.error_outline),
+                                  const SizedBox(width: 12),
+                                  Expanded(child: Text(vm.error)),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          padding: EdgeInsets.all(compact ? 16 : 32),
+                          child: Align(
+                            alignment: Alignment.topCenter,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 960),
+                              child: pages[page](),
                             ),
                           ),
                         ),
                       ),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        padding: EdgeInsets.all(compact ? 16 : 32),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 8,
+                        ),
                         child: Align(
-                          alignment: Alignment.topCenter,
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 960),
-                            child: pages[page](),
+                          alignment: Alignment.centerLeft,
+                          child: Semantics(
+                            liveRegion: true,
+                            child: Text(
+                              vm.message,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 8,
-                      ),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Semantics(
-                          liveRegion: true,
-                          child: Text(
-                            vm.message,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       );

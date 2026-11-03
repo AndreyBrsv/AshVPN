@@ -10,6 +10,7 @@ class ServerWorkspace extends ChangeNotifier {
     _register(current);
   }
   WorkspaceController current;
+  bool operationsSuspended = false;
   final _sessions = <WorkspaceController>[];
   final _attempts = <WorkspaceController, ServerProfile>{};
   final _listeners = <WorkspaceController, VoidCallback>{};
@@ -29,6 +30,7 @@ class ServerWorkspace extends ChangeNotifier {
   void _register(WorkspaceController session) {
     _sessions.add(session);
     session.beforeConnect = (details) => _reserve(session, details);
+    session.canStartOperation = () => !operationsSuspended;
     void changed() {
       if (!session.busy) _attempts.remove(session);
       notifyListeners();
@@ -80,6 +82,7 @@ class ServerWorkspace extends ChangeNotifier {
     for (final session in _sessions) {
       session.removeListener(_listeners[session]!);
       session.beforeConnect = null;
+      session.canStartOperation = null;
     }
     _attempts.clear();
     _listeners.clear();
