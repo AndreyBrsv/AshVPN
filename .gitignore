@@ -73,6 +73,7 @@ host_keys.json*
 *.msi
 *.pkg
 update-settings.json*
+appearance-settings.json*
 updates/
 *.app/
 *.dSYM/

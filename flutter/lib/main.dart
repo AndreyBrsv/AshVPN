@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 
+import 'appearance.dart';
+import 'appearance_dialog.dart';
 import 'connection_details.dart';
 import 'app_update.dart';
 import 'app_update_dialog.dart';
@@ -25,14 +27,39 @@ import 'vless_connection.dart';
 
 export 'workspace_controller.dart' show SshConnector;
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const AshappApp());
+  final appearance = AppearanceController(
+    repository: JsonAppearanceRepository(
+      JsonFileStore(
+        File(path.join(appDataDirectory().path, 'appearance-settings.json')),
+      ),
+    ),
+  );
+  await appearance.initialize();
+  runApp(AshappApp(appearance: appearance));
 }
 
-class AshappApp extends StatelessWidget {
-  const AshappApp({super.key, this.home = const HomePage()});
+class AshappApp extends StatefulWidget {
+  const AshappApp({super.key, this.home = const HomePage(), this.appearance});
   final Widget home;
+  final AppearanceController? appearance;
+
+  @override
+  State<AshappApp> createState() => _AshappAppState();
+}
+
+class _AshappAppState extends State<AshappApp> {
+  // A memory-only default keeps embedded views and tests free of local I/O.
+  final _fallback = AppearanceController();
+  AppearanceController get appearance => widget.appearance ?? _fallback;
+
+  @override
+  void dispose() {
+    _fallback.dispose();
+    super.dispose();
+  }
+
   ThemeData theme(Brightness brightness) {
     final colors = ColorScheme.fromSeed(
       seedColor: const Color(0xff5856d6),
@@ -74,12 +101,19 @@ class AshappApp extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'Ashapp',
-    debugShowCheckedModeBanner: false,
-    theme: theme(Brightness.light),
-    darkTheme: theme(Brightness.dark),
-    home: home,
+  Widget build(BuildContext context) => AppearanceScope(
+    controller: appearance,
+    child: ListenableBuilder(
+      listenable: appearance,
+      builder: (context, _) => MaterialApp(
+        title: 'Ashapp',
+        debugShowCheckedModeBanner: false,
+        theme: theme(Brightness.light),
+        darkTheme: theme(Brightness.dark),
+        themeMode: appearance.mode,
+        home: widget.home,
+      ),
+    ),
   );
 }
 
@@ -1137,6 +1171,15 @@ class _HomePageState extends State<HomePage> {
               overflow: TextOverflow.ellipsis,
             ),
             actions: [
+              if (AppearanceScope.maybeOf(context) case final appearance?)
+                IconButton(
+                  tooltip: 'Appearance',
+                  icon: const Icon(Icons.brightness_6_outlined),
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (_) => AppearanceDialog(controller: appearance),
+                  ),
+                ),
               if (compact)
                 IconButton(
                   tooltip: 'Check for updates',
