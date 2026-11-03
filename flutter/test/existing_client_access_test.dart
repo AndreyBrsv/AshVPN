@@ -130,7 +130,7 @@ void main() {
       await connect(h);
       await tester.pumpWidget(AshappApp(home: HomePage(controller: h.vm)));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('VPN clients'));
+      await tester.tap(find.text('Clients'));
       await tester.pumpAndSettle();
       for (var attempt = 0; attempt < 2; attempt++) {
         await tester.tap(find.widgetWithText(OutlinedButton, 'Show QR code'));
@@ -143,9 +143,7 @@ void main() {
         );
         expect(find.byType(QrImageView), findsOneWidget);
         expect(find.textContaining(key(10)), findsNothing);
-        await tester.tap(
-          find.widgetWithText(OutlinedButton, 'Copy private key'),
-        );
+        await tester.tap(find.byTooltip('Copy private key'));
         await tester.pumpAndSettle();
         expect(copied, key(10));
         await tester.tap(find.widgetWithText(TextButton, 'Close'));
@@ -196,7 +194,7 @@ void main() {
       await connect(h);
       await tester.pumpWidget(AshappApp(home: HomePage(controller: h.vm)));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('VPN clients'));
+      await tester.tap(find.text('Clients'));
       await tester.pumpAndSettle();
       await tester.tap(
         find.widgetWithText(OutlinedButton, 'Import existing .conf'),
@@ -240,7 +238,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.textContaining('too large for a QR code'), findsOneWidget);
-    expect(find.text('Copy configuration'), findsOneWidget);
+    expect(find.byTooltip('Copy configuration'), findsOneWidget);
     expect(find.text('Save .conf'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

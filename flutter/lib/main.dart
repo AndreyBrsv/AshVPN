@@ -22,6 +22,7 @@ import 'ssh_connection.dart';
 import 'template_repository.dart';
 import 'ui_components.dart';
 import 'workspace_controller.dart';
+import 'workspace_shell.dart';
 import 'server_workspace.dart';
 import 'vless_connection.dart';
 
@@ -451,7 +452,7 @@ class _HomePageState extends State<HomePage> {
     children: [
       SectionCard(
         title: 'Your servers',
-        subtitle: 'Set up a VPS once. Come back to manage access, services and credentials.',
+        subtitle: 'Prepare a VPS from a template or manage an existing server.',
         children: [
           Wrap(
             spacing: 12,
@@ -480,7 +481,7 @@ class _HomePageState extends State<HomePage> {
       for (final profile in vm.profiles)
         Card(
           child: Padding(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(16),
             child: Wrap(
               alignment: WrapAlignment.spaceBetween,
               crossAxisAlignment: WrapCrossAlignment.center,
@@ -492,9 +493,12 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     const Icon(Icons.dns_outlined),
                     const SizedBox(width: 16),
-                    Text(
-                      '${profile.ip}:${profile.sshPort}',
-                      style: Theme.of(context).textTheme.titleMedium,
+                    Flexible(
+                      child: Text(
+                        '${profile.ip}:${profile.sshPort}',
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
                     ),
                   ],
                 ),
@@ -617,7 +621,7 @@ class _HomePageState extends State<HomePage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SectionCard(
-          title: vm.ssh!.host,
+          title: 'Server overview',
           subtitle: 'SSH ${vm.ssh!.user} · port ${vm.ssh!.port}',
           children: [
             Wrap(
@@ -686,7 +690,7 @@ class _HomePageState extends State<HomePage> {
                 : 'Container stopped',
             children: const [
               Text(
-                'Manage clients in VPN clients. Use AmneziaVPN for container service controls. Ashapp will not replace this deployment.',
+                'Manage clients in Clients. Use AmneziaVPN for container service controls. Ashapp will not replace this deployment.',
               ),
             ],
           ),
@@ -707,7 +711,7 @@ class _HomePageState extends State<HomePage> {
               ),
             const SizedBox(height: 12),
             const Text(
-              'A separate sing-box service, compatible with running AmneziaWG. Manage each device in VPN clients and export its VLESS link or client JSON. Client changes briefly restart VLESS connections; AmneziaWG is unaffected.',
+              'A separate sing-box service, compatible with running AmneziaWG. Manage each device in Clients and export its VLESS link or client JSON. Client changes briefly restart VLESS connections; AmneziaWG is unaffected.',
             ),
           ],
         ),
@@ -818,7 +822,8 @@ class _HomePageState extends State<HomePage> {
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.person_outline),
                   title: Text(user['name'].toString()),
-                  trailing: TextButton(
+                  trailing: IconButton(
+                    tooltip: 'Saved credentials',
                     onPressed: busy
                         ? null
                         : () async {
@@ -831,7 +836,7 @@ class _HomePageState extends State<HomePage> {
                               setState(() => page = 4);
                             }
                           },
-                    child: const Text('Saved credentials'),
+                    icon: const Icon(Icons.key_outlined),
                   ),
                   subtitle: Text('UID ${user['uid']} · ${user['shell']}'),
                 ),
@@ -974,6 +979,19 @@ class _HomePageState extends State<HomePage> {
                     spacing: 8,
                     runSpacing: 8,
                     children: [
+                      IconButton.filledTonal(
+                        tooltip: 'Copy connection',
+                        onPressed: busy || client['can_export'] == false
+                            ? null
+                            : () => copyClientConnection(
+                                context,
+                                vm,
+                                client['name'].toString(),
+                                source: client['source'] as String?,
+                                publicKey: client['public_key'] as String?,
+                              ),
+                        icon: const Icon(Icons.copy),
+                      ),
                       OutlinedButton.icon(
                         onPressed: busy || client['can_export'] == false
                             ? null
@@ -1003,13 +1021,14 @@ class _HomePageState extends State<HomePage> {
                       ),
                       if (client['source'] != VlessConnection.source &&
                           client['public_key'] is String)
-                        OutlinedButton(
+                        IconButton(
+                          tooltip: 'Copy public key',
                           onPressed: () => copyClientValue(
                             context,
                             client['public_key'] as String,
                             'Public key copied. It cannot be used as a full connection configuration.',
                           ),
-                          child: const Text('Copy public key'),
+                          icon: const Icon(Icons.copy_all),
                         ),
                       if (client['can_import'] == true)
                         OutlinedButton(
@@ -1136,11 +1155,80 @@ class _HomePageState extends State<HomePage> {
           ],
         );
 
+  Widget serverSelector() {
+    final choices = workspace.sessions.where((target) => target.ssh != null);
+    String status(WorkspaceController target) => target.busy
+        ? 'Working'
+        : target.connected
+        ? 'Connected'
+        : 'Disconnected';
+    final address = vm.ssh == null
+        ? 'Select a server'
+        : '${vm.ssh!.host}:${vm.ssh!.port}';
+    return Material(
+      key: ObjectKey(vm),
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(16),
+      clipBehavior: Clip.antiAlias,
+      child: PopupMenuButton<WorkspaceController>(
+        tooltip: 'Switch server',
+        enabled: !opening && choices.isNotEmpty,
+        initialValue: vm,
+        onSelected: (target) async {
+          workspace.select(target);
+          if (!target.busy) await target.initialize();
+        },
+        itemBuilder: (_) => [
+          for (final target in choices)
+            PopupMenuItem(
+              value: target,
+              child: Text(
+                '${target.ssh!.host}:${target.ssh!.port} · ${status(target)}',
+              ),
+            ),
+        ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              const Icon(Icons.dns_outlined),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      address,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Text(
+                      vm.ssh == null
+                          ? 'Switch between open sessions'
+                          : 'SSH · ${status(vm)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Icon(Icons.expand_more),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([workspace, updates]),
     builder: (context, _) {
-      final compact = MediaQuery.sizeOf(context).width < 760;
       final pages = [
         serversPage,
         templatesPage,
@@ -1148,182 +1236,45 @@ class _HomePageState extends State<HomePage> {
         clientsPage,
         accessPage,
       ];
-      const icons = [
-        Icons.dns_outlined,
-        Icons.auto_awesome_mosaic_outlined,
-        Icons.tune,
-        Icons.devices,
-        Icons.key_outlined,
-      ];
-      const labels = [
-        'Servers',
-        'Templates',
-        'Manage',
-        'VPN clients',
-        'Credentials',
-      ];
       return AbsorbPointer(
         absorbing: updates.locksWorkspace,
-        child: Scaffold(
-          appBar: AppBar(
-            title: Text(
-              vm.connected ? 'Ashapp · ${vm.ssh!.host}' : 'Ashapp',
-              overflow: TextOverflow.ellipsis,
-            ),
-            actions: [
-              if (AppearanceScope.maybeOf(context) case final appearance?)
-                IconButton(
-                  tooltip: 'Appearance',
-                  icon: const Icon(Icons.brightness_6_outlined),
-                  onPressed: () => showDialog<void>(
-                    context: context,
-                    builder: (_) => AppearanceDialog(controller: appearance),
-                  ),
-                ),
-              if (compact)
-                IconButton(
-                  tooltip: 'Check for updates',
-                  onPressed: checkForUpdates,
-                  icon: Badge(
-                    isLabelVisible: updates.release != null,
-                    child: const Icon(Icons.system_update_outlined),
-                  ),
-                )
-              else
-                Tooltip(
-                  message: 'Check for updates',
-                  child: TextButton.icon(
-                    onPressed: checkForUpdates,
-                    icon: Badge(
-                      isLabelVisible: updates.release != null,
-                      child: const Icon(Icons.system_update_outlined),
-                    ),
-                    label: Text(
-                      updates.release == null
-                          ? 'Check for updates'
-                          : 'Update available',
-                    ),
-                  ),
-                ),
-              PopupMenuButton<WorkspaceController>(
-                tooltip: 'Switch server',
-                enabled: !opening,
-                icon: const Icon(Icons.dns_outlined),
-                onSelected: (target) async {
-                  workspace.select(target);
-                  if (!target.busy) await target.initialize();
-                },
-                itemBuilder: (_) => [
-                  for (final target in workspace.sessions)
-                    if (target.ssh != null)
-                      PopupMenuItem(
-                        value: target,
-                        child: Text(
-                          '${target.ssh!.host}:${target.ssh!.port} · ${target.busy
-                              ? "Working"
-                              : target.connected
-                              ? "Connected"
-                              : "Disconnected"}',
-                        ),
-                      ),
-                ],
-              ),
-              if (vm.connected)
-                TextButton(
-                  onPressed: busy ? null : () => vm.disconnect(),
-                  child: const Text('Disconnect'),
-                ),
-              const SizedBox(width: 16),
-            ],
-          ),
-          bottomNavigationBar: compact
-              ? NavigationBar(
-                  selectedIndex: page,
-                  labelBehavior:
-                      NavigationDestinationLabelBehavior.onlyShowSelected,
-                  onDestinationSelected: (v) => setState(() => page = v),
-                  destinations: [
-                    for (var i = 0; i < labels.length; i++)
-                      NavigationDestination(
-                        icon: Icon(icons[i]),
-                        label: labels[i],
-                      ),
-                  ],
-                )
+        child: WorkspaceShell(
+          selectedIndex: page,
+          onDestinationSelected: (value) => setState(() => page = value),
+          serverSelector: workspace.sessions.any((target) => target.ssh != null)
+              ? serverSelector()
               : null,
-          body: SafeArea(
-            child: Row(
-              children: [
-                if (!compact)
-                  NavigationRail(
-                    extended: MediaQuery.sizeOf(context).width >= 1100,
-                    selectedIndex: page,
-                    onDestinationSelected: (v) => setState(() => page = v),
-                    destinations: [
-                      for (var i = 0; i < labels.length; i++)
-                        NavigationRailDestination(
-                          icon: Icon(icons[i]),
-                          label: Text(labels[i]),
-                        ),
-                    ],
-                  ),
-                Expanded(
-                  child: Column(
-                    children: [
-                      if (vm.busy) const LinearProgressIndicator(),
-                      if (vm.error.isNotEmpty)
-                        Material(
-                          color: Theme.of(context).colorScheme.errorContainer,
-                          child: Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Semantics(
-                              liveRegion: true,
-                              child: Row(
-                                children: [
-                                  const Icon(Icons.error_outline),
-                                  const SizedBox(width: 12),
-                                  Expanded(child: Text(vm.error)),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          padding: EdgeInsets.all(compact ? 16 : 32),
-                          child: Align(
-                            alignment: Alignment.topCenter,
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 960),
-                              child: pages[page](),
-                            ),
-                          ),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 24,
-                          vertical: 8,
-                        ),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Semantics(
-                            liveRegion: true,
-                            child: Text(
-                              vm.message,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+          working: vm.busy,
+          error: vm.error,
+          message: vm.message,
+          actions: [
+            if (AppearanceScope.maybeOf(context) case final appearance?)
+              IconButton(
+                tooltip: 'Appearance',
+                icon: const Icon(Icons.brightness_6_outlined),
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => AppearanceDialog(controller: appearance),
                 ),
-              ],
+              ),
+            IconButton(
+              tooltip: updates.release == null
+                  ? 'Check for updates'
+                  : 'Update available',
+              onPressed: checkForUpdates,
+              icon: Badge(
+                isLabelVisible: updates.release != null,
+                child: const Icon(Icons.system_update_outlined),
+              ),
             ),
-          ),
+            if (vm.connected)
+              IconButton(
+                tooltip: 'Disconnect from this server',
+                onPressed: busy ? null : () => vm.disconnect(),
+                icon: const Icon(Icons.logout),
+              ),
+          ],
+          child: pages[page](),
         ),
       );
     },

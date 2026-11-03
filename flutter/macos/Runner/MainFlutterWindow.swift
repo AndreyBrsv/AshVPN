@@ -9,6 +9,15 @@ class MainFlutterWindow: NSWindow {
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
+    self.contentMinSize = NSSize(width: 420, height: 480)
+    var initialSize = NSSize(width: 520, height: 760)
+    if let visible = (self.screen ?? NSScreen.main)?.visibleFrame {
+      let titleHeight = self.frame.height - self.contentRect(forFrameRect: self.frame).height
+      initialSize.width = max(420, min(initialSize.width, visible.width - 24))
+      initialSize.height = max(480, min(initialSize.height, visible.height - titleHeight - 24))
+    }
+    self.setContentSize(initialSize)
+    self.center()
 
     RegisterGeneratedPlugins(registry: flutterViewController)
     let updates = FlutterMethodChannel(name: "ashapp/app-update",

@@ -357,7 +357,7 @@ void main() {
         ),
       );
       expect(tester.widget<PrivateQr>(find.byType(PrivateQr)).data, c.link);
-      await tester.tap(find.text('Copy'));
+      await tester.tap(find.byTooltip('Copy connection'));
       await tester.pump();
       expect(clipboard, c.link);
       for (final format in [
@@ -370,7 +370,7 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text(format.label).last);
         await tester.pumpAndSettle();
-        await tester.tap(find.text('Copy'));
+        await tester.tap(find.byTooltip('Copy connection'));
         await tester.pump();
         expect(clipboard, c.export(format));
         expect(tester.widget<PrivateQr>(find.byType(PrivateQr)).data, c.link);

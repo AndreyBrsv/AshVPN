@@ -133,11 +133,25 @@ bool Win32Window::Create(const std::wstring& title,
   HMONITOR monitor = MonitorFromPoint(target_point, MONITOR_DEFAULTTONEAREST);
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
+  int width = Scale(size.width, scale_factor);
+  int height = Scale(size.height, scale_factor);
+  int left = Scale(origin.x, scale_factor);
+  int top = Scale(origin.y, scale_factor);
+  MONITORINFO information = {};
+  information.cbSize = sizeof(information);
+  if (GetMonitorInfoW(monitor, &information)) {
+    const int available_width = information.rcWork.right - information.rcWork.left;
+    const int available_height = information.rcWork.bottom - information.rcWork.top;
+    const int margin = Scale(12, scale_factor);
+    if (width > available_width - 2 * margin) width = available_width - 2 * margin;
+    if (height > available_height - 2 * margin) height = available_height - 2 * margin;
+    left = information.rcWork.left + (available_width - width) / 2;
+    top = information.rcWork.top + (available_height - height) / 2;
+  }
 
   HWND window = CreateWindow(
       window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
+      left, top, width, height,
       nullptr, nullptr, GetModuleHandle(nullptr), this);
 
   if (!window) {
@@ -179,6 +193,17 @@ Win32Window::MessageHandler(HWND hwnd,
                             WPARAM const wparam,
                             LPARAM const lparam) noexcept {
   switch (message) {
+    case WM_GETMINMAXINFO: {
+      const UINT dpi = GetDpiForWindow(hwnd);
+      RECT minimum = {0, 0, MulDiv(420, dpi, 96), MulDiv(480, dpi, 96)};
+      AdjustWindowRectExForDpi(&minimum, GetWindowLong(hwnd, GWL_STYLE), FALSE,
+                              GetWindowLong(hwnd, GWL_EXSTYLE), dpi);
+      auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
+      limits->ptMinTrackSize.x = minimum.right - minimum.left;
+      limits->ptMinTrackSize.y = minimum.bottom - minimum.top;
+      return 0;
+    }
+
     case WM_DESTROY:
       window_handle_ = nullptr;
       Destroy();

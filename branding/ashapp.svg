@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Ashapp</title>
+  <desc>Ashapp Carbon. Warm off-white raised A and small sh on warm charcoal.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#292623" />
+      <stop offset="1" stop-color="#0C0A09" />
+    </linearGradient>
+    <linearGradient id="a-side" gradientUnits="userSpaceOnUse" x1="0" y1="238" x2="0" y2="814">
+      <stop offset="0" stop-color="#7A7169" />
+      <stop offset="1" stop-color="#453A33" />
+    </linearGradient>
+    <linearGradient id="a-edge" gradientUnits="userSpaceOnUse" x1="0" y1="232" x2="0" y2="798">
+      <stop offset="0" stop-color="#FFFDFA" />
+      <stop offset="0.35" stop-color="#E7E0D9" />
+      <stop offset="0.65" stop-color="#9D9085" />
+      <stop offset="1" stop-color="#62534A" />
+    </linearGradient>
+    <linearGradient id="a-face" gradientUnits="userSpaceOnUse" x1="0" y1="244" x2="0" y2="786">
+      <stop offset="0" stop-color="#FFFDF9" />
+      <stop offset="0.45" stop-color="#F8F4EE" />
+      <stop offset="1" stop-color="#D8CFC5" />
+    </linearGradient>
+    <filter id="tile-shadow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="20" stdDeviation="14" flood-color="#000000" flood-opacity="0.42" />
+    </filter>
+    <filter id="letter-shadow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="10" flood-color="#000000" flood-opacity="0.4" />
+    </filter>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#tile)" stroke="#3B342F" stroke-width="4" filter="url(#tile-shadow)" />
+  <g filter="url(#letter-shadow)">
+    <polyline points="236,756 428,304 620,756" fill="none" stroke="url(#a-side)" stroke-width="102" stroke-linecap="round" stroke-linejoin="round" />
+    <line x1="306" y1="594" x2="550" y2="594" stroke="url(#a-side)" stroke-width="94" stroke-linecap="round" />
+    <polyline points="226,738 418,286 610,738" fill="none" stroke="url(#a-edge)" stroke-width="102" stroke-linecap="round" stroke-linejoin="round" />
+    <line x1="296" y1="576" x2="540" y2="576" stroke="url(#a-edge)" stroke-width="94" stroke-linecap="round" />
+    <polyline points="226,738 418,286 610,738" fill="none" stroke="url(#a-face)" stroke-width="86" stroke-linecap="round" stroke-linejoin="round" />
+    <line x1="296" y1="576" x2="540" y2="576" stroke="url(#a-face)" stroke-width="78" stroke-linecap="round" />
+    <polyline points="742,704 730,694 713,694 701,704 701,717 713,727 730,733 742,744 741,759 729,770 714,772 701,765" fill="none" stroke="#D8CFC5" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" />
+    <line x1="774" y1="646" x2="774" y2="772" stroke="#D8CFC5" stroke-width="20" stroke-linecap="round" />
+    <polyline points="774,722 779,705 791,695 805,697 818,710 818,772" fill="none" stroke="#D8CFC5" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>

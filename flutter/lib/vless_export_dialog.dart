@@ -22,8 +22,18 @@ class VlessExportDialog extends StatefulWidget {
 
 class _VlessExportDialogState extends State<VlessExportDialog> {
   VlessExportFormat format = VlessExportFormat.link;
-  bool revealed = false, saving = false;
+  bool saving = false;
   late bool qr = widget.initialQr;
+
+  @override
+  void didUpdateWidget(covariant VlessExportDialog oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.connection != widget.connection ||
+        oldWidget.endpoint != widget.endpoint) {
+      qr = widget.initialQr;
+      format = VlessExportFormat.link;
+    }
+  }
 
   Future<void> save() async {
     final selected = format;
@@ -66,7 +76,9 @@ class _VlessExportDialogState extends State<VlessExportDialog> {
             ),
             const SizedBox(height: 16),
             DropdownButtonFormField<VlessExportFormat>(
+              key: ValueKey((widget.connection, widget.endpoint)),
               initialValue: format,
+              isExpanded: true,
               decoration: const InputDecoration(labelText: 'Export format'),
               items: [
                 for (final item in VlessExportFormat.values)
@@ -78,7 +90,6 @@ class _VlessExportDialogState extends State<VlessExportDialog> {
                       if (value != null) {
                         setState(() {
                           format = value;
-                          revealed = false;
                         });
                       }
                     },
@@ -90,25 +101,33 @@ class _VlessExportDialogState extends State<VlessExportDialog> {
                   : 'Standalone core config: local proxy on 127.0.0.1:10808. It does not enable a system VPN. Validated target: ${format == VlessExportFormat.xray ? 'Xray 26.10.31' : 'sing-box 1.14.4'}. GUI apps may expect a link instead.',
             ),
             const SizedBox(height: 16),
+            Row(
+              children: [
+                const Expanded(child: Text('Client connection')),
+                IconButton.filledTonal(
+                  tooltip: 'Copy connection',
+                  onPressed: saving
+                      ? null
+                      : () => copyClientValue(
+                          context,
+                          widget.connection.export(format),
+                          'Connection copied. Keep it private.',
+                        ),
+                  icon: const Icon(Icons.copy),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                OutlinedButton(
-                  onPressed: () => setState(() => revealed = !revealed),
-                  child: Text(revealed ? 'Hide connection' : 'Show connection'),
-                ),
                 OutlinedButton(
                   onPressed: () => setState(() => qr = !qr),
                   child: Text(qr ? 'Hide QR code' : 'Show QR code'),
                 ),
               ],
             ),
-            if (revealed)
-              Padding(
-                padding: const EdgeInsets.only(top: 16),
-                child: SelectableText(widget.connection.export(format)),
-              ),
             if (qr) ...[
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 16),
@@ -138,16 +157,6 @@ class _VlessExportDialogState extends State<VlessExportDialog> {
       TextButton(
         onPressed: saving ? null : () => Navigator.pop(context),
         child: const Text('Close'),
-      ),
-      OutlinedButton(
-        onPressed: saving
-            ? null
-            : () => copyClientValue(
-                context,
-                widget.connection.export(format),
-                'Connection copied. Keep it private.',
-              ),
-        child: const Text('Copy'),
       ),
       FilledButton(
         onPressed: saving ? null : save,

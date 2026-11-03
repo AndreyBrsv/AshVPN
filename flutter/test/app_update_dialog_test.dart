@@ -86,10 +86,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Update available'), findsOneWidget);
+      expect(find.byTooltip('Update available'), findsOneWidget);
       final repository = vm.repository.transport as FixtureTransport;
       final checksBefore = repository.requests.length;
-      await tester.tap(find.byTooltip('Check for updates'));
+      await tester.tap(find.byTooltip('Update available'));
       await tester.pumpAndSettle();
       expect(repository.requests.length, checksBefore + 1);
       expect(find.text('App updates'), findsOneWidget);

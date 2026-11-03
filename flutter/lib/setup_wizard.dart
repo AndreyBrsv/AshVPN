@@ -394,6 +394,7 @@ class _SetupWizardState extends State<SetupWizard> {
             padding: const EdgeInsets.only(bottom: 24),
             child: DropdownButtonFormField<String>(
               initialValue: selection ?? 'manual',
+              isExpanded: true,
               decoration: const InputDecoration(labelText: 'Setup method'),
               items: [
                 const DropdownMenuItem(
@@ -853,7 +854,11 @@ class _SetupWizardState extends State<SetupWizard> {
                 ),
                 Padding(
                   padding: const EdgeInsets.all(24),
-                  child: Row(
+                  child: OverflowBar(
+                    alignment: MainAxisAlignment.end,
+                    overflowAlignment: OverflowBarAlignment.end,
+                    spacing: 8,
+                    overflowSpacing: 8,
                     children: [
                       if (step > 0 && step < 6)
                         OutlinedButton(
@@ -865,7 +870,6 @@ class _SetupWizardState extends State<SetupWizard> {
                                 }),
                           child: const Text('Back'),
                         ),
-                      const Spacer(),
                       if (step < 5)
                         FilledButton(
                           onPressed: busy ? null : next,
@@ -890,7 +894,6 @@ class _SetupWizardState extends State<SetupWizard> {
                           child: const Text('Review answers'),
                         ),
                       if (step == 6 && !busy) ...[
-                        const SizedBox(width: 8),
                         FilledButton(
                           onPressed: () => Navigator.pop(context, true),
                           child: const Text('Open server'),

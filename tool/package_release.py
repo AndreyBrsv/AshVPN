@@ -13,7 +13,7 @@ from pathlib import Path
 from build_installers import build_installer
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.0.5'
+VERSION = '0.0.6'
 FLUTTER_VERSION = '3.47.9'
 FLUTTER_REVISION = 'c197ca5199'
 

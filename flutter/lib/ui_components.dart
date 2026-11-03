@@ -23,13 +23,21 @@ class SectionCard extends StatelessWidget {
   Widget build(BuildContext context) => Card(
     margin: const EdgeInsets.only(bottom: 16),
     child: Padding(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.all(MediaQuery.sizeOf(context).width < 900 ? 16 : 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(title, style: Theme.of(context).textTheme.titleLarge),
-          if (subtitle != null) ...[const SizedBox(height: 8), Text(subtitle!)],
-          const SizedBox(height: 20),
+          if (subtitle != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              subtitle!,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
           ...children,
         ],
       ),
@@ -147,10 +155,35 @@ Future<void> copyClientValue(
     if (context.mounted) {
       showNotice(
         context,
-        'Could not copy to the clipboard. Try saving the .conf file.',
+        'Could not copy to the clipboard. Try saving a file instead.',
       );
     }
   }
+}
+
+Future<void> copyClientConnection(
+  BuildContext context,
+  WorkspaceController controller,
+  String name, {
+  String? source,
+  String? publicKey,
+}) async {
+  final String? content;
+  if (source == VlessConnection.source) {
+    content = (await controller.vlessConnection(name, publicKey ?? ''))?.link;
+  } else {
+    content = await controller.clientConfig(
+      name,
+      source: source,
+      publicKey: publicKey,
+    );
+  }
+  if (!context.mounted || content == null) return;
+  await copyClientValue(
+    context,
+    content,
+    'Connection copied. Keep it private.',
+  );
 }
 
 Future<void> exportClient(
@@ -208,7 +241,7 @@ class ClientExportDialog extends StatefulWidget {
 }
 
 class _ClientExportDialogState extends State<ClientExportDialog> {
-  bool revealed = false, saving = false;
+  bool saving = false;
   late bool qr = widget.initialQr;
 
   @override
@@ -217,7 +250,6 @@ class _ClientExportDialogState extends State<ClientExportDialog> {
     if (oldWidget.config != widget.config ||
         oldWidget.endpoint != widget.endpoint ||
         oldWidget.name != widget.name) {
-      revealed = false;
       qr = widget.initialQr;
     }
   }
@@ -257,37 +289,51 @@ class _ClientExportDialogState extends State<ClientExportDialog> {
               'This is the saved configuration of this existing client. Opening, copying or showing its QR code does not create or rotate any key.',
             ),
             const SizedBox(height: 16),
+            Row(
+              children: [
+                const Expanded(child: Text('Client configuration')),
+                IconButton.filledTonal(
+                  tooltip: 'Copy configuration',
+                  onPressed: saving
+                      ? null
+                      : () => copyClientValue(
+                          context,
+                          widget.config,
+                          'Configuration copied, including its original private key.',
+                        ),
+                  icon: const Icon(Icons.copy),
+                ),
+              ],
+            ),
+            if (ClientConfiguration(widget.config).privateKey
+                case final String key)
+              Row(
+                children: [
+                  const Expanded(child: Text('Private key')),
+                  IconButton(
+                    tooltip: 'Copy private key',
+                    onPressed: saving
+                        ? null
+                        : () => copyClientValue(
+                            context,
+                            key,
+                            'Private key copied. Keep it secret.',
+                          ),
+                    icon: const Icon(Icons.copy),
+                  ),
+                ],
+              ),
+            const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
                 OutlinedButton(
-                  onPressed: () => setState(() => revealed = !revealed),
-                  child: Text(
-                    revealed ? 'Hide configuration' : 'Show configuration',
-                  ),
-                ),
-                OutlinedButton(
                   onPressed: () => setState(() => qr = !qr),
                   child: Text(qr ? 'Hide QR code' : 'Show QR code'),
                 ),
-                if (ClientConfiguration(widget.config).privateKey
-                    case final String key)
-                  OutlinedButton(
-                    onPressed: () => copyClientValue(
-                      context,
-                      key,
-                      'Private key copied. Keep it secret.',
-                    ),
-                    child: const Text('Copy private key'),
-                  ),
               ],
             ),
-            if (revealed)
-              Padding(
-                padding: const EdgeInsets.only(top: 16),
-                child: SelectableText(widget.config),
-              ),
             if (qr)
               Center(
                 child: ConstrainedBox(
@@ -310,16 +356,6 @@ class _ClientExportDialogState extends State<ClientExportDialog> {
       TextButton(
         onPressed: saving ? null : () => Navigator.pop(context),
         child: const Text('Close'),
-      ),
-      OutlinedButton(
-        onPressed: saving
-            ? null
-            : () => copyClientValue(
-                context,
-                widget.config,
-                'Configuration copied, including its original private key.',
-              ),
-        child: const Text('Copy configuration'),
       ),
       FilledButton(
         onPressed: saving ? null : save,

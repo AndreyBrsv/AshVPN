@@ -22,15 +22,9 @@ class ImportClientDialog extends StatefulWidget {
 }
 
 class _ImportClientDialogState extends State<ImportClientDialog> {
-  final controller = TextEditingController();
-  bool reveal = false, replace = false, loading = false;
+  String configuration = '';
+  bool replace = false, loading = false;
   String error = '';
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
 
   Future<void> load(bool clipboard) async {
     setState(() {
@@ -60,8 +54,7 @@ class _ImportClientDialogState extends State<ImportClientDialog> {
         );
         return;
       }
-      controller.text = content;
-      setState(() => reveal = false);
+      setState(() => configuration = content!);
     } catch (_) {
       if (mounted) {
         setState(
@@ -101,34 +94,14 @@ class _ImportClientDialogState extends State<ImportClientDialog> {
                   onPressed: loading ? null : () => load(true),
                   child: const Text('Paste configuration'),
                 ),
-                TextButton(
-                  onPressed: loading
-                      ? null
-                      : () => setState(() => reveal = !reveal),
-                  child: Text(
-                    reveal ? 'Hide configuration' : 'Show configuration',
-                  ),
-                ),
               ],
             ),
             const SizedBox(height: 12),
-            if (reveal)
-              TextField(
-                controller: controller,
-                enabled: !loading,
-                maxLines: 8,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration: const InputDecoration(
-                  labelText: 'Private client configuration',
-                ),
-              )
-            else
-              Text(
-                controller.text.isEmpty
-                    ? 'No configuration selected.'
-                    : 'Private configuration loaded and hidden.',
-              ),
+            Text(
+              configuration.isEmpty
+                  ? 'No configuration selected.'
+                  : 'Private configuration loaded and hidden.',
+            ),
             CheckboxListTile(
               value: replace,
               contentPadding: EdgeInsets.zero,
@@ -154,7 +127,7 @@ class _ImportClientDialogState extends State<ImportClientDialog> {
         onPressed: loading
             ? null
             : () {
-                final config = ClientConfiguration(controller.text);
+                final config = ClientConfiguration(configuration);
                 if (!config.withinLimit || config.privateKey == null) {
                   setState(
                     () => error = 'Import a full .conf containing its original private key. Export vpn:// links to .conf in the original app first.',
@@ -163,7 +136,7 @@ class _ImportClientDialogState extends State<ImportClientDialog> {
                 }
                 Navigator.pop(
                   context,
-                  ImportedClientConfiguration(controller.text, replace),
+                  ImportedClientConfiguration(configuration, replace),
                 );
               },
         child: const Text('Save existing configuration'),

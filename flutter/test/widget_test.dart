@@ -39,14 +39,14 @@ void main() {
       );
       await tester.tap(find.widgetWithText(FilledButton, 'Connect'));
       await tester.pumpAndSettle();
-      expect(find.text('Ashapp · 203.0.113.20'), findsOneWidget);
+      expect(find.text('203.0.113.20:22'), findsOneWidget);
       expect(h.vm.connected, isTrue);
       expect(h.backends.where((b) => !b.closed), hasLength(2));
       await tester.tap(find.byTooltip('Switch server'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('203.0.113.10:22 · Connected'));
       await tester.pumpAndSettle();
-      expect(find.text('Ashapp · 203.0.113.10'), findsOneWidget);
+      expect(find.text('203.0.113.10:22'), findsWidgets);
       expect(h.vm.ssh!.password, 'test-first-placeholder');
       expect(tester.takeException(), isNull);
     },
@@ -248,7 +248,7 @@ void main() {
   });
 
   testWidgets(
-    'private client export opens masked and supports explicit reveal',
+    'private client export offers copy and QR without revealing text',
     (tester) async {
       await tester.pumpWidget(
         const AshappApp(
@@ -261,9 +261,8 @@ void main() {
         ),
       );
       expect(find.text('private-config-test-placeholder'), findsNothing);
-      await tester.tap(find.text('Show configuration'));
-      await tester.pumpAndSettle();
-      expect(find.text('private-config-test-placeholder'), findsOneWidget);
+      expect(find.text('Show configuration'), findsNothing);
+      expect(find.byTooltip('Copy configuration'), findsOneWidget);
       await tester.tap(find.text('Show QR code'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);

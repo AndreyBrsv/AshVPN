@@ -117,7 +117,7 @@ void main() {
     await h.vm.connect(login, (_, _) async => true);
     await tester.pumpWidget(AshappApp(home: HomePage(controller: h.vm)));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('VPN clients'));
+    await tester.tap(find.text('Clients'));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, 'Create client'));
     await tester.pumpAndSettle();
@@ -169,7 +169,7 @@ void main() {
       await h.vm.connect(login, (_, _) async => true);
       await tester.pumpWidget(AshappApp(home: HomePage(controller: h.vm)));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('VPN clients'));
+      await tester.tap(find.text('Clients'));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(TextButton, 'Rename'));
       await tester.pumpAndSettle();

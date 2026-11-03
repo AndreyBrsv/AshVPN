@@ -5,6 +5,7 @@ AppName=Ashapp
 AppVersion={#AppVersion}
 AppPublisher=Ashapp contributors
 AppPublisherURL=https://github.com/AndreyBrsv/Ashapp
+SetupIconFile="{#SourceRoot}\flutter\windows\runner\resources\app_icon.ico"
 DefaultDirName={localappdata}\Programs\Ashapp
 DefaultGroupName=Ashapp
 PrivilegesRequired=lowest
