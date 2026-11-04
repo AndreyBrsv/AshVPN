@@ -65,6 +65,7 @@ class ServerWorkspace extends ChangeNotifier {
       templatesRepository: current.templatesRepository,
       vault: current.vault,
       connector: current.connector,
+      keyConnector: current.keyConnector,
       backendFactory: current.backendFactory,
     );
     _register(next);

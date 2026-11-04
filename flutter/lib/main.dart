@@ -22,6 +22,9 @@ import 'ssh_connection.dart';
 import 'template_repository.dart';
 import 'ui_components.dart';
 import 'workspace_controller.dart';
+import 'security_panel.dart';
+import 'operation_progress.dart';
+import 'private_key_field.dart';
 import 'workspace_shell.dart';
 import 'server_workspace.dart';
 import 'vless_connection.dart';
@@ -196,7 +199,13 @@ class _HomePageState extends State<HomePage> {
   }
 
   bool get canInstallUpdate =>
-      !opening && workspace.sessions.every((session) => !session.busy);
+      !opening &&
+      workspace.sessions.every(
+        (session) =>
+            !session.busy &&
+            !session.securityPending &&
+            session.socksTunnel == null,
+      );
 
   void updateOperationGate() {
     workspace.operationsSuspended = updates.locksWorkspace;
@@ -391,16 +400,25 @@ class _HomePageState extends State<HomePage> {
     final exists =
         target.server['socks5_configured'] == true ||
         target.server['socks5'] == true;
-    if (exists && !await target.readSocks()) return;
+    final unsupportedPrivate =
+        target.server['socks5_private_supported'] == false;
+    if (exists && !unsupportedPrivate && !await target.readSocks()) return;
     if (!mounted) return;
     final result = await values(
       exists ? 'Replace SOCKS5 credentials' : 'Install SOCKS5',
       [
-        InputSpec('SOCKS5 TCP port', initial: '${target.socks?.port ?? 1080}'),
-        InputSpec('SOCKS5 username', initial: target.socks?.user ?? ''),
+        InputSpec(
+          'SOCKS5 TCP port',
+          initial:
+              '${target.server['socks5_port'] ?? target.socks?.port ?? 1080}',
+        ),
+        InputSpec(
+          'SOCKS5 username',
+          initial: unsupportedPrivate ? '' : target.socks?.user ?? '',
+        ),
         InputSpec(
           'SOCKS5 password',
-          initial: target.socks?.password ?? '',
+          initial: unsupportedPrivate ? '' : target.socks?.password ?? '',
           secret: true,
         ),
       ],
@@ -410,27 +428,59 @@ class _HomePageState extends State<HomePage> {
           : 'Docker will be installed if needed. Use letters, numbers or underscores; the password needs at least 8 characters.',
     );
     if (result != null) {
+      if (!mounted) return;
+      final access = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('SOCKS5 access'),
+          children: [
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, 'public'),
+              child: const Text(
+                'Public · password authentication, no SOCKS5 encryption',
+              ),
+            ),
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, 'private'),
+              child: const Text(
+                'Private · SSH tunnel, requires Docker Engine 28+',
+              ),
+            ),
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      );
+      if (access == null) return;
       await target.configureSocks(
         int.tryParse(result[0]) ?? 0,
         result[1].trim(),
         result[2],
         replace: exists,
+        access: access,
       );
     }
   }
 
   Future<void> service(String kind, String operation) async {
     final target = vm;
-    if (operation != 'start' &&
+    final actionLabel = switch (operation) {
+      'start' => 'Start',
+      'stop' => 'Stop',
+      _ => 'Restart',
+    };
+    if ((operation != 'start' || target.managesFirewall) &&
         !await confirmAction(
           context,
-          '${operation == 'stop' ? 'Stop' : 'Restart'} ${kind == 'awg'
+          '$actionLabel ${kind == 'awg'
               ? 'AmneziaWG'
               : kind == 'vless'
               ? 'VLESS / sing-box'
               : 'SOCKS5'}?',
-          'Active connections to this service will be interrupted.',
-          action: operation == 'stop' ? 'Stop' : 'Restart',
+          'Active connections may be interrupted. ${operation != 'stop' && target.managesFirewall ? 'The existing Ashapp firewall will be refreshed and verified through a new SSH connection.' : ''}',
+          action: actionLabel,
         )) {
       return;
     }
@@ -624,6 +674,7 @@ class _HomePageState extends State<HomePage> {
           title: 'Server overview',
           subtitle: 'SSH ${vm.ssh!.user} · port ${vm.ssh!.port}',
           children: [
+            if (vm.busy) OperationProgress(controller: vm),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -720,6 +771,31 @@ class _HomePageState extends State<HomePage> {
           subtitle:
               '${socks ? 'Running' : 'Stopped or not installed'}${vm.server['socks5_port'] != null ? ' · TCP ${vm.server['socks5_port']}' : ''}',
           children: [
+            if (vm.server['socks5_access_warning'] != null)
+              Text(vm.server['socks5_access_warning'].toString()),
+            if (vm.server['socks5_access'] == 'private') ...[
+              if (vm.server['socks5_private_supported'] != false)
+                const Text(
+                  'Private access · server loopback only. Keep Ashapp connected while using the SSH tunnel.',
+                ),
+              OutlinedButton(
+                onPressed:
+                    busy ||
+                        (vm.server['socks5_private_supported'] == false &&
+                            vm.socksTunnel == null)
+                    ? null
+                    : () => vm.socksTunnel == null
+                          ? vm.startSocksTunnel()
+                          : vm.stopSocksTunnel(),
+                child: Text(
+                  vm.socksTunnel == null
+                      ? 'Start private SOCKS5 tunnel'
+                      : 'Stop private SOCKS5 tunnel',
+                ),
+              ),
+              if (vm.socksTunnel != null)
+                Text('Local proxy: 127.0.0.1:${vm.socksTunnel!.port}'),
+            ],
             if (vm.server['socks5_configured'] == true || socks) ...[
               serviceButtons('socks', socks),
               const SizedBox(height: 12),
@@ -747,6 +823,7 @@ class _HomePageState extends State<HomePage> {
               ),
           ],
         ),
+        SecurityPanel(key: ObjectKey(vm), controller: vm),
         SectionCard(
           title: 'Server access and security',
           children: [
@@ -1145,7 +1222,7 @@ class _HomePageState extends State<HomePage> {
                       if (await confirmAction(
                         context,
                         'Forget saved SSH credentials?',
-                        'Remove the saved login and password from this device. The current session remains open.',
+                        'Remove saved passwords and SSH private keys for this server from this device. The current session remains open. Keep a protected recovery key before forgetting key-only access.',
                       )) {
                         await target.forgetPassword();
                       }
@@ -1384,9 +1461,16 @@ class _ConnectDialogState extends State<ConnectDialog> {
   late final password = TextEditingController(
     text: widget.saved?.password ?? '',
   );
+  late final privateKey = TextEditingController(
+    text: widget.saved?.privateKey ?? '',
+  );
+  late final passphrase = TextEditingController(
+    text: widget.saved?.keyPassphrase ?? '',
+  );
+  late bool keyLogin = widget.saved?.usesKey ?? false;
   @override
   void dispose() {
-    for (final c in [host, port, user, password]) {
+    for (final c in [host, port, user, password, privateKey, passphrase]) {
       c.dispose();
     }
     super.dispose();
@@ -1399,6 +1483,8 @@ class _ConnectDialogState extends State<ConnectDialog> {
         port: int.tryParse(port.text) ?? 0,
         user: user.text.trim(),
         password: password.text,
+        privateKey: keyLogin ? privateKey.text : '',
+        keyPassphrase: passphrase.text,
       ),
       (type, fp) => context.mounted
           ? confirmServerKey(context, type, fp)
@@ -1439,11 +1525,32 @@ class _ConnectDialogState extends State<ConnectDialog> {
                         decoration: InputDecoration(labelText: pair.$2),
                       ),
                     ),
-                  SecretField(
-                    controller: password,
-                    label: 'Password',
-                    enabled: !vm.busy,
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Use an SSH key'),
+                    value: keyLogin,
+                    onChanged: vm.busy
+                        ? null
+                        : (value) => setState(() => keyLogin = value!),
                   ),
+                  if (keyLogin) ...[
+                    PrivateKeyField(
+                      controller: privateKey,
+                      enabled: !vm.busy,
+                      label: 'SSH private key (paste)',
+                    ),
+                    SecretField(
+                      controller: passphrase,
+                      label: 'Key passphrase (optional)',
+                      enabled: !vm.busy,
+                    ),
+                  ],
+                  if (!keyLogin)
+                    SecretField(
+                      controller: password,
+                      label: 'Password',
+                      enabled: !vm.busy,
+                    ),
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Remember credentials on this device'),

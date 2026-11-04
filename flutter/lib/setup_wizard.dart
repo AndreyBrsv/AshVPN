@@ -7,6 +7,8 @@ import 'setup_secrets.dart';
 import 'ui_components.dart';
 import 'workspace_controller.dart';
 import 'vless_connection.dart';
+import 'operation_progress.dart';
+import 'private_key_field.dart';
 
 /// Manual setup and templates edit the same questions and execute one plan.
 class SetupWizard extends StatefulWidget {
@@ -36,6 +38,14 @@ class _SetupWizardState extends State<SetupWizard> {
       adminPassword = TextEditingController();
   final keyText = TextEditingController(),
       awgPort = TextEditingController(text: '585');
+  final privateKey = TextEditingController(),
+      keyPassphrase = TextEditingController();
+  bool keyLogin = false, generateKey = false;
+  bool protectSsh = true,
+      configureFirewall = true,
+      automaticUpdates = false,
+      disablePasswords = false;
+  String socksAccess = 'public';
   final dns = TextEditingController(text: '1.1.1.1'),
       socksPort = TextEditingController(text: '1080');
   final socksUser = TextEditingController(),
@@ -85,6 +95,15 @@ class _SetupWizardState extends State<SetupWizard> {
       login.text = vm.ssh!.user;
       loginPassword.text = vm.ssh!.password;
       createAdmin = widget.initial?.createAdmin ?? false;
+      if (privateKey.text.isEmpty) {
+        privateKey.text = vm.ssh!.privateKey;
+        keyPassphrase.text = vm.ssh!.keyPassphrase;
+      }
+      keyLogin = vm.ssh!.usesKey;
+      if (widget.initial == null) {
+        protectSsh = false;
+        configureFirewall = false;
+      }
     }
   }
 
@@ -107,6 +126,15 @@ class _SetupWizardState extends State<SetupWizard> {
     upgrade = item.upgradePackages;
     changeRoot = item.changeRootPassword;
     createAdmin = item.createAdmin;
+    protectSsh = item.protectSsh;
+    configureFirewall = item.configureFirewall;
+    automaticUpdates = item.automaticUpdates;
+    disablePasswords = item.disablePasswordLogin;
+    generateKey = item.generateSshKey;
+    socksAccess = item.socksAccess;
+    privateKey.text = secrets.sshPrivateKey;
+    keyPassphrase.text = secrets.sshKeyPassphrase;
+    keyLogin = privateKey.text.isNotEmpty;
     login.text = secrets.connectionUser;
     loginPassword.text = secrets.connectionPassword;
     rootPassword.text = secrets.rootPassword;
@@ -120,6 +148,10 @@ class _SetupWizardState extends State<SetupWizard> {
       port.text = '${vm.ssh!.port}';
       login.text = vm.ssh!.user;
       loginPassword.text = vm.ssh!.password;
+      if (privateKey.text.isEmpty) {
+        privateKey.text = vm.ssh!.privateKey;
+        keyPassphrase.text = vm.ssh!.keyPassphrase;
+      }
     }
   }
 
@@ -199,6 +231,12 @@ class _SetupWizardState extends State<SetupWizard> {
               .where((s) => s.isNotEmpty)
               .toList()
         : [],
+    protectSsh: protectSsh,
+    configureFirewall: configureFirewall,
+    automaticUpdates: automaticUpdates,
+    disablePasswordLogin: disablePasswords,
+    generateSshKey: generateKey,
+    socksAccess: socksAccess,
   );
   SetupSecrets secrets() => SetupSecrets(
     connectionUser: login.text.trim(),
@@ -209,6 +247,8 @@ class _SetupWizardState extends State<SetupWizard> {
     socksUser: socksUser.text.trim(),
     socksPassword: socksPassword.text,
     sshPublicKey: keyText.text.trim(),
+    sshPrivateKey: privateKey.text,
+    sshKeyPassphrase: keyPassphrase.text,
   );
   String? validateStep() {
     if (step == 0) {
@@ -218,7 +258,7 @@ class _SetupWizardState extends State<SetupWizard> {
         }
       } else if (host.text.trim().isEmpty ||
           login.text.trim().isEmpty ||
-          loginPassword.text.isEmpty ||
+          (keyLogin ? privateKey.text.isEmpty : loginPassword.text.isEmpty) ||
           (int.tryParse(port.text) ?? 0) < 1 ||
           (int.tryParse(port.text) ?? 65536) > 65535) {
         return 'Enter the address, port, username and password.';
@@ -237,6 +277,11 @@ class _SetupWizardState extends State<SetupWizard> {
     if (step >= 3) {
       try {
         final item = answers();
+        if (!widget.editTemplate &&
+            vm.needsFirewallRefresh(item) &&
+            !item.configureFirewall) {
+          return 'Go back to Security and select Configure firewall to refresh its allowlist for the new service.';
+        }
         return secrets().validate(
           item,
           activeUser: widget.editTemplate ? null : vm.ssh?.user,
@@ -263,6 +308,8 @@ class _SetupWizardState extends State<SetupWizard> {
           port: int.parse(port.text),
           user: login.text.trim(),
           password: loginPassword.text,
+          privateKey: keyLogin ? privateKey.text : '',
+          keyPassphrase: keyPassphrase.text,
         ),
         (type, fingerprint) => context.mounted
             ? confirmServerKey(context, type, fingerprint)
@@ -321,6 +368,8 @@ class _SetupWizardState extends State<SetupWizard> {
       adminName,
       adminPassword,
       keyText,
+      privateKey,
+      keyPassphrase,
       awgPort,
       dns,
       socksPort,
@@ -423,12 +472,27 @@ class _SetupWizardState extends State<SetupWizard> {
             login,
             widget.editTemplate ? 'Default SSH username' : 'Username',
           ),
-          secret(
-            loginPassword,
-            widget.editTemplate
-                ? 'Default SSH password (optional)'
-                : 'Password',
+          toggle(
+            'Use an SSH key',
+            'Authenticate with an imported private key instead of a password.',
+            keyLogin,
+            (v) => keyLogin = v,
           ),
+          if (keyLogin) ...[
+            PrivateKeyField(
+              controller: privateKey,
+              enabled: !busy,
+              label: 'SSH private key (paste)',
+            ),
+            secret(keyPassphrase, 'Key passphrase (optional)'),
+          ],
+          if (!keyLogin)
+            secret(
+              loginPassword,
+              widget.editTemplate
+                  ? 'Default SSH password (optional)'
+                  : 'Password',
+            ),
         ],
         if (!widget.editTemplate)
           CheckboxListTile(
@@ -470,11 +534,49 @@ class _SetupWizardState extends State<SetupWizard> {
           'SSH public key (optional)',
           helper: 'Password login stays available. Never paste a private key.',
         ),
+        toggle(
+          'Generate a server SSH key',
+          'Create a unique key for this server and save it in the OS vault after verifying key login.',
+          generateKey,
+          (v) => generateKey = v,
+        ),
+        if (!generateKey && !keyLogin) ...[
+          PrivateKeyField(
+            controller: privateKey,
+            enabled: !busy,
+            label: 'SSH private key to install (optional)',
+          ),
+          secret(keyPassphrase, 'Private key passphrase (optional)'),
+        ],
       ],
     ),
     2 => SectionCard(
       title: 'Security and updates',
       children: [
+        toggle(
+          'Protect SSH with Fail2ban',
+          '5 failures within 10 minutes → block the address for 15 minutes. Existing jails are preserved.',
+          protectSsh,
+          (v) => protectSsh = v,
+        ),
+        toggle(
+          'Configure firewall',
+          'Review and preserve current SSH, service and Docker ports. Required when adding a service behind an existing Ashapp firewall.',
+          configureFirewall,
+          (v) => configureFirewall = v,
+        ),
+        toggle(
+          'Disable password SSH login',
+          'All users. Requires a verified key saved in the OS vault. Off by default.',
+          disablePasswords,
+          (v) => disablePasswords = v,
+        ),
+        toggle(
+          'Automatic security updates',
+          'Distribution security fixes only. No automatic reboot. Off by default.',
+          automaticUpdates,
+          (v) => automaticUpdates = v,
+        ),
         toggle(
           'Disable root SSH login',
           'Only after independently verifying administrator login and sudo.',
@@ -567,6 +669,26 @@ class _SetupWizardState extends State<SetupWizard> {
               (v) => installSocks = v,
             ),
             if (installSocks) ...[
+              DropdownButtonFormField<String>(
+                initialValue: socksAccess,
+                decoration: const InputDecoration(labelText: 'SOCKS5 access'),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'public',
+                    child: Text('Public · current behavior'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'private',
+                    child: Text('Private · SSH tunnel'),
+                  ),
+                ],
+                onChanged: busy
+                    ? null
+                    : (value) => setState(() => socksAccess = value!),
+              ),
+              const Text(
+                'Public SOCKS5 password authentication is not encrypted by SOCKS5. Private mode requires already-running stable Docker Engine 28+ on the server and publishes to server loopback; start its tunnel in Manage.',
+              ),
               field(socksPort, 'SOCKS5 TCP port'),
               field(socksUser, 'SOCKS5 username'),
               secret(
@@ -618,8 +740,35 @@ class _SetupWizardState extends State<SetupWizard> {
               detail: adminName.text,
             ),
             _review('Disable root SSH login', disableRoot),
+            _review('Protect SSH with Fail2ban', protectSsh),
+            _review('Configure firewall', configureFirewall),
+            _review('Automatic security updates', automaticUpdates),
+            _review('Disable password SSH login', disablePasswords),
+            _review('Generate a server SSH key', generateKey),
+            _review(
+              'Install and verify an imported SSH key',
+              !generateKey && privateKey.text.isNotEmpty,
+            ),
             _review('Block ping replies', blockPing),
             _review('Update system packages', upgrade),
+            if (configureFirewall && !widget.editTemplate) ...[
+              const SizedBox(height: 12),
+              Text(
+                'Existing listening ports to preserve: ${vm.security?['listeners'] ?? 'Inspected before applying'}',
+              ),
+              Text(
+                'Existing Docker publications to preserve: ${vm.security?['docker_ports'] ?? 'Inspected before applying'}',
+              ),
+              Text(
+                'Selected public ports: TCP ${vm.ssh?.port}'
+                '${installAwg ? ', UDP ${awgPort.text}' : ''}'
+                '${installVless ? ', TCP ${vlessPort.text}' : ''}'
+                '${installSocks && socksAccess == 'public' ? ', TCP ${socksPort.text}' : ''}',
+              ),
+              const Text(
+                'Existing firewall policy keeps its precedence. Unsupported external firewalls stop setup; unconfirmed changes roll back after 180 seconds.',
+              ),
+            ],
             _review(
               'Install AmneziaWG kernel',
               installAwg,
@@ -634,7 +783,7 @@ class _SetupWizardState extends State<SetupWizard> {
             _review(
               'Install SOCKS5',
               installSocks,
-              detail: 'TCP ${socksPort.text}',
+              detail: 'TCP ${socksPort.text} · $socksAccess',
             ),
             _review('Install SSH public key', keyText.text.trim().isNotEmpty),
             const SizedBox(height: 16),
@@ -678,6 +827,7 @@ class _SetupWizardState extends State<SetupWizard> {
               : 'Setup needs attention',
           subtitle: vm.message,
           children: [
+            OperationProgress(controller: vm),
             for (final task in vm.tasks)
               ListTile(
                 contentPadding: EdgeInsets.zero,
@@ -724,7 +874,7 @@ class _SetupWizardState extends State<SetupWizard> {
                 Text(
                   'UDP ${vm.server['awg_port'] ?? awgPort.text} · AmneziaWG',
                 ),
-              if (installSocks)
+              if (installSocks && socksAccess == 'public')
                 Text('TCP ${vm.socks?.port ?? socksPort.text} · SOCKS5'),
               if (installVless)
                 Text(

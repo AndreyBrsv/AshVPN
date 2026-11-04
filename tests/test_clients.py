@@ -1,6 +1,7 @@
 """Local regression checks. No SSH connections or privileged commands are run."""
 import importlib.util
 import base64
+import json
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,84 @@ spec.loader.exec_module(clients)
 
 
 class ClientTests(unittest.TestCase):
+    def test_private_socks_requires_supported_stable_daemon_not_client_version(self):
+        allowed = ('28.0.0', '29.1.2', '28.2.2-0ubuntu1~24.04.1', '28.0.1+dfsg1', '28.0.1+azure-1')
+        refused = ('27.5.1', '20.10.24', '', 'unknown', '28.0', '28.0.0-rc.1', '29.0.0-beta1',
+                   '28.0.0-1dev', '28.0.0-custom', '28.0.0\n27.0.0')
+        for version in allowed + refused:
+            with self.subTest(version=version):
+                self.run.return_value = subprocess.CompletedProcess([], 0, version, '')
+                self.run.side_effect = None
+                if version in allowed:
+                    self.assertTrue(clients.require_private_socks_engine()['private_socks_ready'])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'Docker Engine 28'):
+                        clients.require_private_socks_engine()
+                self.run.assert_called_with(['docker', 'version', '--format', '{{.Server.Version}}'], check=False)
+        self.run.return_value = subprocess.CompletedProcess([], 1, '29.0.0', 'unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'Docker Engine 28'):
+            clients.require_private_socks_engine()
+        self.run.side_effect = FileNotFoundError('docker')
+        with self.assertRaisesRegex(RuntimeError, 'Docker Engine 28'):
+            clients.require_private_socks_engine()
+
+    def socks_commands(self, args, data=None, check=True):
+        if args[:2] == ['docker', 'inspect']:
+            return subprocess.CompletedProcess(args, 0, json.dumps([self.socks_container]), '')
+        if args[:2] == ['docker', 'exec']:
+            return subprocess.CompletedProcess(args, 0, 'users test:CL:test_placeholder\nsocks -p1080\n', '')
+        if args[:2] == ['docker', 'version']:
+            return subprocess.CompletedProcess(args, 0, getattr(self, 'engine_version', '27.5.1') + '\n', '')
+        return subprocess.CompletedProcess(args, 1 if args[0] != 'docker' else 0, '', '')
+
+    def test_unsupported_private_details_and_activation_are_refused_but_stop_and_public_remain(self):
+        self.socks_container = {'HostConfig': {'PortBindings': {'1080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '1080'}]}},
+                                'NetworkSettings': {'Ports': {}}, 'State': {'Running': False}}
+        self.run.side_effect = self.socks_commands
+        with self.assertRaisesRegex(RuntimeError, 'Docker Engine 28'):
+            clients.socks_info()
+        for operation in ('start', 'restart'):
+            self.run.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, 'Docker Engine 28'):
+                clients.service_control('socks', operation)
+            self.assertNotIn(unittest.mock.call(['docker', operation, clients.SOCKS_NAME]), self.run.call_args_list)
+        self.run.reset_mock()
+        self.assertTrue(clients.service_control('socks', 'stop')['ok'])
+        self.assertNotIn(unittest.mock.call(['docker', 'version', '--format', '{{.Server.Version}}'], check=False), self.run.call_args_list)
+        for wildcard in ('0.0.0.0', '', '::'):
+            self.socks_container['HostConfig']['PortBindings']['1080/tcp'][0]['HostIp'] = wildcard
+            self.socks_container['NetworkSettings']['Ports'] = {'1080/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '1080'}]}
+            self.assertEqual(clients.socks_info()['access'], 'public')
+            self.assertTrue(clients.service_control('socks', 'start')['ok'])
+        self.socks_container['HostConfig']['PortBindings']['1080/tcp'][0]['HostIp'] = '127.0.0.1'
+        self.engine_version = '28.0.0'
+        self.assertEqual(clients.socks_info()['access'], 'private')
+        self.assertTrue(clients.service_control('socks', 'start')['ok'])
+
+    def test_unsupported_private_status_preserves_other_protocols_and_stopped_bindings(self):
+        self.socks_container = {'HostConfig': {'PortBindings': {'1080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '1080'}]}},
+                                'NetworkSettings': {'Ports': {}}, 'State': {'Running': False}}
+        def status_run(args, data=None, check=True):
+            if args[:2] == ['sh', '-c']:
+                return subprocess.CompletedProcess(args, 0, '', '')
+            return self.socks_commands(args, data, check)
+        self.run.side_effect = status_run
+        manager = unittest.mock.Mock()
+        manager.status.return_value = {'vless': True}
+        with patch.object(clients, 'vless_manager', return_value=manager), patch.object(clients, 'amnezia_containers', return_value=[]):
+            result = clients.status()
+        self.assertTrue(result['vless'])
+        self.assertTrue(result['socks5_configured'])
+        self.assertFalse(result['socks5'])
+        self.assertEqual(result['socks5_port'], 1080)
+        self.assertFalse(result['socks5_private_supported'])
+        self.assertIn('Docker Engine 28', result['socks5_access_warning'])
+        self.socks_container['HostConfig']['PortBindings']['1080/tcp'][0]['HostIp'] = ''
+        with patch.object(clients, 'vless_manager', return_value=manager), patch.object(clients, 'amnezia_containers', return_value=[]):
+            result = clients.status()
+        self.assertTrue(result['vless'])
+        self.assertEqual(result['socks5_access'], 'public')
+
     def test_vless_actions_route_by_source_and_uuid_without_host_mutations(self):
         from unittest.mock import Mock
         manager = Mock()

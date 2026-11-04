@@ -258,9 +258,19 @@ def status():
                 obj = json.loads(proc.stdout)[0]
                 result[field] = bool(obj["State"]["Running"])
                 result[field + '_configured'] = True
-                for key, bindings in obj["NetworkSettings"]["Ports"].items():
+                for key, bindings in socks_publications(obj).items():
                     if bindings and (target is None or key == target):
                         result[field + "_port"] = int(bindings[0]["HostPort"])
+                        result[field + '_access'] = 'private' if all(
+                            ipaddress.ip_address(binding.get('HostIp') or '0.0.0.0').is_loopback
+                            for binding in bindings) else 'public'
+                        if result[field + '_access'] == 'private':
+                            try:
+                                require_private_socks_engine()
+                                result['socks5_private_supported'] = True
+                            except RuntimeError as error:
+                                result['socks5_private_supported'] = False
+                                result['socks5_access_warning'] = str(error)
                         break
     icmp = run(["iptables", "-C", "INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-j", "DROP"], check=False)
     result["icmp_blocked"] = icmp.returncode == 0
@@ -564,6 +574,30 @@ def rename_client(name, replacement):
     return {'renamed': True}
 
 
+def require_private_socks_engine():
+    message = ('Private SOCKS5 requires stable Docker Engine 28.0.0 or newer. '
+               'Older localhost publications may be reachable from nearby hosts. '
+               'Install/start a supported daemon manually if unavailable; '
+               'Ashapp will not upgrade or restart shared Docker automatically.')
+    try:
+        version = run(['docker', 'version', '--format', '{{.Server.Version}}'], check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError(message) from None
+    text = version.stdout.strip()
+    parsed = re.fullmatch(r'(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})'
+                          r'(?:[-+](?:\d|dfsg|ubuntu|azure|ce)[A-Za-z0-9.+~_-]{0,127})?', text)
+    if (version.returncode or not parsed or tuple(map(int, parsed.groups())) < (28, 0, 0)
+            or re.search(r'alpha|beta|rc|dev|nightly|test', text, re.I)):
+        raise RuntimeError(message)
+    return {'private_socks_ready': True}
+
+
+def socks_publications(inspected):
+    # HostConfig survives container stop; runtime Ports can be empty then.
+    return (inspected.get('HostConfig', {}).get('PortBindings')
+            or inspected.get('NetworkSettings', {}).get('Ports') or {})
+
+
 def socks_info():
     proc = run(["docker", "exec", SOCKS_NAME, "cat", SOCKS_CONFIG], check=False)
     if proc.returncode:
@@ -572,7 +606,13 @@ def socks_info():
     port = re.search(r"(?m)^socks -p([0-9]+)\s*$", proc.stdout)
     if not match or not port:
         raise RuntimeError("The SOCKS5 configuration format is unsupported.")
-    return {"user": match.group(1), "password": match.group(2), "port": int(port.group(1))}
+    inspected = json.loads(run(['docker', 'inspect', SOCKS_NAME]).stdout)[0]
+    bindings = socks_publications(inspected).get(port.group(1) + '/tcp') or []
+    private = bool(bindings) and all(ipaddress.ip_address(item.get('HostIp') or '0.0.0.0').is_loopback for item in bindings)
+    if private:
+        require_private_socks_engine()
+    return {"user": match.group(1), "password": match.group(2), "port": int(port.group(1)),
+            'access': 'private' if private else 'public'}
 
 
 def recv_exact(sock, size):
@@ -622,6 +662,11 @@ def service_control(kind, operation):
         if operation != 'stop' and not verified_kernel(iface):
             raise ValueError('The VPN did not start as a kernel interface.')
     elif kind == 'socks':
+        if operation != 'stop':
+            inspected = json.loads(run(['docker', 'inspect', SOCKS_NAME]).stdout)[0]
+            if any(ipaddress.ip_address(item.get('HostIp') or '0.0.0.0').is_loopback
+                   for bindings in socks_publications(inspected).values() for item in bindings or []):
+                require_private_socks_engine()
         run(['docker', operation, SOCKS_NAME])
     else:
         raise ValueError('Invalid service.')
@@ -652,6 +697,8 @@ def main():
             result = socks_info()
         elif action == "socks-check":
             result = socks_check()
+        elif action == 'socks-private-ready':
+            result = require_private_socks_engine()
         elif action == 'users':
             result = users()
         elif action == 'awg-control':

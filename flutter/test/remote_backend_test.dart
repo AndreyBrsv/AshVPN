@@ -179,7 +179,7 @@ void main() {
         client.commands.where(
           (s) => s.startsWith('umask 077; cat > /tmp/ashapp.test2/'),
         ),
-        hasLength(6),
+        hasLength(7),
       );
     },
   );

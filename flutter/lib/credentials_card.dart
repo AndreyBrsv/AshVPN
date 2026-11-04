@@ -39,11 +39,22 @@ class _CredentialsCardState extends State<CredentialsCard> {
           Wrap(
             spacing: 8,
             children: [
-              TextButton.icon(
-                onPressed: () => setState(() => _revealed = !_revealed),
-                icon: Icon(_revealed ? Icons.visibility_off : Icons.visibility),
-                label: Text(_revealed ? 'Hide password' : 'Show password'),
-              ),
+              if (widget.details.usesKey)
+                IconButton(
+                  tooltip: 'Copy SSH private key',
+                  icon: const Icon(Icons.key_outlined),
+                  onPressed: () => Clipboard.setData(
+                    ClipboardData(text: widget.details.privateKey),
+                  ),
+                ),
+              if (!widget.details.usesKey)
+                TextButton.icon(
+                  onPressed: () => setState(() => _revealed = !_revealed),
+                  icon: Icon(
+                    _revealed ? Icons.visibility_off : Icons.visibility,
+                  ),
+                  label: Text(_revealed ? 'Hide password' : 'Show password'),
+                ),
               TextButton.icon(
                 onPressed: () async {
                   await Clipboard.setData(

@@ -93,7 +93,7 @@ void main() {
         lessThan(actions.indexOf('create-user')),
       );
       final disable = h.server.calls.indexWhere(
-        (c) => c.$1 == 'ssh-config' && c.$2[1] == 'no',
+        (c) => c.$1 == 'security-stage' && c.$2[0].contains('disable_root'),
       );
       expect(
         h.server.calls

@@ -23,6 +23,12 @@ class ServerTemplate {
     String realitySni = 'www.microsoft.com',
     String realityFingerprint = 'chrome',
     List<String> vlessClientNames = const [],
+    bool protectSsh = true,
+    bool configureFirewall = true,
+    bool automaticUpdates = false,
+    bool disablePasswordLogin = false,
+    bool generateSshKey = false,
+    String socksAccess = 'public',
   }) => fromJson({
     'name': name,
     'block_ping': blockPing,
@@ -43,6 +49,12 @@ class ServerTemplate {
     'reality_sni': realitySni,
     'reality_fingerprint': realityFingerprint,
     'vless_client_names': vlessClientNames,
+    'protect_ssh': protectSsh,
+    'configure_firewall': configureFirewall,
+    'automatic_updates': automaticUpdates,
+    'disable_password_login': disablePasswordLogin,
+    'generate_ssh_key': generateSshKey,
+    'socks_access': socksAccess,
   });
 
   const ServerTemplate._({
@@ -65,6 +77,12 @@ class ServerTemplate {
     required this.realitySni,
     required this.realityFingerprint,
     required this.vlessClientNames,
+    required this.protectSsh,
+    required this.configureFirewall,
+    required this.automaticUpdates,
+    required this.disablePasswordLogin,
+    required this.generateSshKey,
+    required this.socksAccess,
   });
 
   final String name;
@@ -85,6 +103,9 @@ class ServerTemplate {
   final int vlessPort;
   final String realitySni, realityFingerprint;
   final List<String> vlessClientNames;
+  final bool protectSsh, configureFirewall, automaticUpdates;
+  final bool disablePasswordLogin, generateSshKey;
+  final String socksAccess;
   ServerTemplate withCredentialsRef(String ref) =>
       fromJson({...toJson(), 'credentials_ref': ref});
 
@@ -108,6 +129,12 @@ class ServerTemplate {
     'reality_sni': realitySni,
     'reality_fingerprint': realityFingerprint,
     'vless_client_names': List<String>.unmodifiable(vlessClientNames),
+    'protect_ssh': protectSsh,
+    'configure_firewall': configureFirewall,
+    'automatic_updates': automaticUpdates,
+    'disable_password_login': disablePasswordLogin,
+    'generate_ssh_key': generateSshKey,
+    'socks_access': socksAccess,
   };
 
   static ServerTemplate fromJson(Object? json) {
@@ -129,6 +156,25 @@ class ServerTemplate {
     final sni = json['reality_sni'] ?? 'www.microsoft.com';
     final fingerprint = json['reality_fingerprint'] ?? 'chrome';
     final vlessClients = json['vless_client_names'] ?? <String>[];
+    // Existing templates must not silently acquire new server mutations.
+    final security = <String, bool>{};
+    for (final key in [
+      'protect_ssh',
+      'configure_firewall',
+      'automatic_updates',
+      'disable_password_login',
+      'generate_ssh_key',
+    ]) {
+      final value = json[key] ?? false;
+      if (value is! bool) {
+        throw const FormatException('Invalid security choices.');
+      }
+      security[key] = value;
+    }
+    final access = json['socks_access'] ?? 'public';
+    if (access != 'public' && access != 'private') {
+      throw const FormatException('Invalid SOCKS5 access mode.');
+    }
     if (installVless is! bool ||
         vlessPort is! int ||
         vlessPort < 1 ||
@@ -208,6 +254,12 @@ class ServerTemplate {
       realitySni: sni,
       realityFingerprint: fingerprint,
       vlessClientNames: List<String>.unmodifiable(vlessClients.cast<String>()),
+      protectSsh: security['protect_ssh']!,
+      configureFirewall: security['configure_firewall']!,
+      automaticUpdates: security['automatic_updates']!,
+      disablePasswordLogin: security['disable_password_login']!,
+      generateSshKey: security['generate_ssh_key']!,
+      socksAccess: access as String,
     );
   }
 

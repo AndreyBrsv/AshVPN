@@ -12,6 +12,60 @@ import 'support/fakes.dart';
 
 void main() {
   testWidgets(
+    'unsupported private SOCKS5 stays stoppable and can be explicitly replaced',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final h = Harness();
+      addTearDown(h.vm.dispose);
+      h.server.state.addAll({
+        'socks5': true,
+        'socks5_configured': true,
+        'socks5_access': 'private',
+        'socks5_private_supported': false,
+        'socks5_access_warning':
+            'Private SOCKS5 requires Docker Engine 28.0.0 or newer.',
+      });
+      await h.vm.connect(
+        const ConnectionDetails(
+          host: '203.0.113.10',
+          port: 22,
+          user: 'root',
+          password: 'test-ui-placeholder',
+        ),
+        (_, _) async => true,
+      );
+      h.server.calls.clear();
+      h.server.failAction = 'socks-info';
+      await tester.pumpWidget(AshappApp(home: HomePage(controller: h.vm)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Private SOCKS5 requires Docker Engine 28'),
+        findsOneWidget,
+      );
+      final start = find.widgetWithText(
+        OutlinedButton,
+        'Start private SOCKS5 tunnel',
+      );
+      expect(tester.widget<OutlinedButton>(start).onPressed, isNull);
+      expect(find.textContaining('server loopback only'), findsNothing);
+      final replace = find.text('Manage SOCKS5 credentials');
+      await tester.ensureVisible(replace);
+      await tester.tap(replace);
+      await tester.pumpAndSettle();
+      expect(find.text('Replace SOCKS5 credentials'), findsOneWidget);
+      expect(h.server.calls.where((call) => call.$1 == 'socks-info'), isEmpty);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'connecting a second server retains the first session and switching restores its view',
     (tester) async {
       final h = Harness();
@@ -212,7 +266,10 @@ void main() {
         await tester.pumpAndSettle();
       }
       expect(find.text('Review your answers'), findsOneWidget);
-      expect(find.text('Install SOCKS5: Yes · TCP 1081'), findsOneWidget);
+      expect(
+        find.text('Install SOCKS5: Yes · TCP 1081 · public'),
+        findsOneWidget,
+      );
       expect(find.textContaining('test-admin-placeholder'), findsNothing);
       await tester.tap(find.widgetWithText(FilledButton, 'Save template'));
       await tester.pumpAndSettle();

@@ -43,6 +43,12 @@ void main() {
         'reality_sni',
         'reality_fingerprint',
         'vless_client_names',
+        'protect_ssh',
+        'configure_firewall',
+        'automatic_updates',
+        'disable_password_login',
+        'generate_ssh_key',
+        'socks_access',
       });
       expect((await repository.load()).single.clientNames, ['phone']);
     } finally {

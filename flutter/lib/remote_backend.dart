@@ -101,6 +101,7 @@ class RemoteBackend {
         'amneziawg-install.sh',
         'awg_setup.py',
         'vless_manager.py',
+        'security_manager.py',
       ]) {
         _checkOpen();
         final asset = await rootBundle.load('assets/$name');
@@ -212,7 +213,7 @@ class RemoteBackend {
     if (!connection.client.isClosed) {
       try {
         await connection.client.run(
-          'rm -f $path/remote.sh $path/clients.py $path/amnezia_clients.py $path/amneziawg-install.sh $path/awg_setup.py $path/vless_manager.py; rmdir $path',
+          'rm -f $path/remote.sh $path/clients.py $path/amnezia_clients.py $path/amneziawg-install.sh $path/awg_setup.py $path/vless_manager.py $path/security_manager.py; rmdir $path',
         );
       } catch (_) {
         /* The connection may already be lost. */

@@ -10,19 +10,19 @@ Open source under the [MIT license](LICENSE). Targets: Windows x64, macOS Intel 
 
 Ashapp installs **AmneziaWG as a Linux kernel module** and/or **VLESS + Reality + XTLS Vision**, manages per-device access and optionally runs an authenticated SOCKS5 proxy in Docker. Both VPN protocols can run on one VPS as independent services. Multiple SSH connections retain independent state, including servers sharing an IP with different SSH ports. The app does not buy VPS instances or run a local VPN tunnel.
 
-## Download v0.0.6
+## Download v0.0.7
 
-**v0.0.6** adds a compact workspace, direct connection-copy icons and the warm Carbon logo across desktop assets. It retains the saved System / Light / Dark appearance choice, verified updater, security fixes and AmneziaWG/VLESS client management. The links below are the v0.0.6 release targets; downloads become available only after Windows x64 and both macOS builds pass CI and publication completes. Local protocol-core checks cover Xray/sing-box traffic and access revocation; fresh VPS provisioning remains unverified.
+**v0.0.7** adds SSH-key authentication, optional SSH brute-force protection, reversible security settings with a reconnect-confirmation deadline, per-server diagnostics, private SOCKS5 over SSH and step-based progress. Automatic OS security updates and disabling password SSH login are **off by default**. The links below are release targets; downloads become available only after Windows x64 and both macOS builds pass CI and publication completes. Fresh-VPS deployment and recovery remain unverified; see [security settings and limitations](docs/SERVER_SECURITY.md).
 
 This repository and its releases are **public**. Downloads are published after all three native checks succeed. A source ZIP is not an application installer.
 
 | Computer | Installer | Complete portable archive |
 | --- | --- | --- |
-| Windows 10/11 x64 | [Install Windows](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/Ashapp-v0.0.6-windows-x64-setup.exe) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/Ashapp-v0.0.6-windows-x64.zip) |
-| macOS 12+, Intel | [Install macOS Intel](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/Ashapp-v0.0.6-macos-x64-setup.pkg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/Ashapp-v0.0.6-macos-x64.zip) |
-| macOS 12+, Apple Silicon | [Install macOS Apple Silicon](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/Ashapp-v0.0.6-macos-arm64-setup.pkg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/Ashapp-v0.0.6-macos-arm64.zip) |
+| Windows 10/11 x64 | [Install Windows](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-windows-x64-setup.exe) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-windows-x64.zip) |
+| macOS 12+, Intel | [Install macOS Intel](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-x64-setup.pkg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-x64.zip) |
+| macOS 12+, Apple Silicon | [Install macOS Apple Silicon](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-arm64-setup.pkg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-arm64.zip) |
 
-[Release page](https://github.com/AndreyBrsv/Ashapp/releases/tag/v0.0.6) · [SHA256SUMS](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/SHA256SUMS) · [Matching source](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.6/Ashapp-v0.0.6-source.zip)
+[Release page](https://github.com/AndreyBrsv/Ashapp/releases/tag/v0.0.7) · [SHA256SUMS](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/SHA256SUMS) · [Matching source](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-source.zip)
 
 **Windows:** run Setup and open Ashapp from the Start menu. For the portable ZIP instead, extract the entire archive and open `ashapp.exe`; keep its DLLs and `data` directory beside it. If a runtime is missing, install the official [Microsoft Visual C++ x64 Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe); see [Microsoft's documentation](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). Flutter, Python, Docker and C++ Build Tools are not required on the computer running the packaged app. The Windows application is not Authenticode-signed.
 
@@ -33,7 +33,7 @@ This repository and its releases are **public**. Downloads are published after a
 Download the ZIP and `SHA256SUMS` from the same release. In PowerShell, compare the output with its checksum line:
 
 ```powershell
-Get-FileHash .\Ashapp-v0.0.6-windows-x64.zip -Algorithm SHA256
+Get-FileHash .\Ashapp-v0.0.7-windows-x64.zip -Algorithm SHA256
 ```
 
 On macOS, put the ZIP and checksum file in one directory:
@@ -47,7 +47,7 @@ A checksum detects changed bytes. It does not independently prove the builder's 
 Public release builds publish [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations) when the workflow supports them. Check the matching tag and build manifest. For a build that actually published an attestation, use the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-gh attestation verify Ashapp-v0.0.6-windows-x64.zip --repo AndreyBrsv/Ashapp
+gh attestation verify Ashapp-v0.0.7-windows-x64.zip --repo AndreyBrsv/Ashapp
 ```
 
 Inspect the reported source commit and compare it with the release tag and build manifest. Public CI makes the build process inspectable; byte-for-byte reproducible builds are not claimed. GitHub workflow attestations require no private signing keys in this repository.
@@ -58,7 +58,7 @@ Select **Appearance** (the brightness icon in the top toolbar), then **System**,
 
 ### Compact workspace
 
-Version v0.0.6 opens a compact window of approximately 520 × 760, adjusted to fit the display, with **Servers / Templates / Manage / Clients / Access** along the bottom. Widening the window moves these destinations to a sidebar. The server selector keeps the selected SSH address, port and session state visible on every page; switching servers preserves the other sessions. Forms and long pages scroll, including with larger text.
+Version v0.0.7 opens a compact window of approximately 520 × 760, adjusted to fit the display, with **Servers / Templates / Manage / Clients / Access** along the bottom. Widening the window moves these destinations to a sidebar. The server selector keeps the selected SSH address, port and session state visible on every page; switching servers preserves the other sessions. Forms and long pages scroll, including with larger text.
 
 In **Clients**, the **Copy connection** icon copies the existing AmneziaWG configuration or VLESS link directly, without displaying its keys. Export dialogs offer copy icons, file saving and QR codes without a plaintext reveal step. VLESS format selection still controls which link or JSON is copied or saved; its QR always contains the original VLESS link. **Access** contains masked SSH/SOCKS5 credentials.
 
@@ -72,7 +72,7 @@ Choose **Download update**, then **Install update…**. Ashapp selects Windows x
 
 Ashapp opens Windows Setup or macOS Installer and closes itself. Complete that system dialog, then reopen the app. Windows installs per user into `%LOCALAPPDATA%\Programs\Ashapp`, without an administrator prompt; macOS installs `/Applications/Ashapp.app` and may request administrator approval. Saved profiles, templates, trusted host keys and OS-vault entries are outside the application bundle and are preserved. Replacing an ad-hoc macOS build can prompt for Keychain access again. A previous portable Windows copy or a Mac copy outside Applications remains a separate, older copy; use the installed app after updating.
 
-**Bootstrap and validation:** downloadable v0.0.3 has no updater or system installers. Install v0.0.4 or later manually once. From an installed v0.0.4 or v0.0.5, use **Check for updates** to download v0.0.6, finish Windows Setup/macOS Installer and reopen the installed app. Native CI compiles/packages the app and runs local tests; actual installer execution, macOS Installer sandbox handoff and OS-vault retention still need an end-to-end check. No claim of a completed end-to-end update is made.
+**Bootstrap and validation:** downloadable v0.0.3 has no updater or system installers. Install v0.0.4 or later manually once. From an installed v0.0.4 or v0.0.5, use **Check for updates** to download v0.0.7, finish Windows Setup/macOS Installer and reopen the installed app. Native CI compiles/packages the app and runs local tests; actual installer execution, macOS Installer sandbox handoff and OS-vault retention still need an end-to-end check. No claim of a completed end-to-end update is made.
 
 Updates currently trust the public GitHub repository and HTTPS. Checksums detect altered bytes; they are not independent publisher signatures. Windows packages remain unsigned and macOS packages are not Developer ID-signed/notarized. OS security confirmation may be required. This version does not silently install, bypass OS security prompts or implement cryptographically signed/offline update feeds. See [update behavior and release requirements](docs/UPDATES.md).
 
@@ -120,6 +120,16 @@ Use **Connect to existing** for another connection. The server menu at the top s
 Management includes service status, VPN-client creation/revocation/export, service start/stop/restart, administrator creation, root-password rotation, ping policy, Linux-account inspection, saved credentials, SOCKS5 replacement and reboot. Lost private client files cannot be reconstructed from public keys: revoke the old client and create another.
 
 Repeated setup preserves existing VPN/SOCKS5 configurations and adds missing requested clients. SOCKS5 replacement is explicit and checks authentication before removing the previous container. Failed initial VPN activation removes its new partial configuration so setup can be retried. Completed package upgrades and account changes remain applied after a later step fails; inspect progress and refresh status before retrying.
+
+## Server security controls
+
+Use **Manage → Security → Run diagnostics** for the selected endpoint. Controls are drafts until **Review and apply changes** is confirmed. New setup/templates offer SSH Fail2ban and firewall configuration; legacy templates acquire neither automatically. Automatic OS security updates and disabling all password SSH login start off. Setup's unselected choices preserve existing policy; explicit management changes can turn Ashapp protection on or off.
+
+SSH keys can be generated separately per server or imported. A fresh key login and sudo check must succeed and the key must be saved in the OS vault before disabling password login. Private key text stays hidden; **Copy SSH private key** is explicit. Root SSH denial is a separate choice. Unsupported conditional SSH policy requires manual review.
+
+Security changes are staged with a 180-second deadline. A separate authenticated SSH connection confirms them. Without confirmation, a server timer attempts recovery; a boot recovery unit also handles an interrupted reboot. Concurrent external edits can require manual recovery. Package installation is not rolled back. Keep the provider console available. Firewall protection uses owned IPv4/IPv6 rules, preserving existing ports/policy; active external UFW/firewalld, restrictive existing INPUT base policies and unsupported Docker backends require manual review. Diagnostics show listening ports, not proof of Internet reachability.
+
+SOCKS5 defaults to its existing public mode. **Private · SSH tunnel** requires stable Docker Engine 28.0.0 or newer on the server and publishes on server loopback; older localhost publications have a documented Docker exposure issue. Unsupported existing private services remain stoppable or explicitly replaceable; Ashapp does not upgrade the shared Docker daemon automatically. Start its tunnel in Manage, then use the displayed **127.0.0.1:local-port** and proxy credentials in your client; keep Ashapp connected. This is a local SSH forward, not adoption by AmneziaVPN or a VPN-only listener. Stop private tunnels before installing an app update. See [Server security](docs/SERVER_SECURITY.md) for ownership, Fail2ban, OS updates and validation limits.
 
 ## Credentials and security limits
 

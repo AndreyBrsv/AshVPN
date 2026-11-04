@@ -166,7 +166,8 @@ ssh_config() {
     cat "$new" > /etc/ssh/sshd_config
     rm -f -- "$new"
     extra="$(mktemp /etc/ssh/.ashapp-extra.XXXXXXXX)"
-    printf 'PasswordAuthentication yes\nPubkeyAuthentication yes\n' > "$extra"
+    # Do not reopen password authentication on an already hardened server.
+    printf 'PubkeyAuthentication yes\n' > "$extra"
     if [[ "$root_mode" == no ]]; then
         printf 'PermitRootLogin no\n' >> "$extra"
     elif [[ -n "$SSH_EXTRA_BACKUP" ]]; then
@@ -179,7 +180,7 @@ ssh_config() {
     addr="${SSH_CONNECTION:-127.0.0.1}"; addr="${addr%% *}"
     host="$(hostname)"
     password_effective="$(/usr/sbin/sshd -T -C "user=$user,addr=$addr,host=$host" | awk '$1=="passwordauthentication" {print $2}')"
-    [[ "$password_effective" == yes ]] || fatal 'An SSH Match block prevents password login; restoring the original configuration.'
+    [[ -n "$password_effective" ]] || fatal 'SSH authentication policy could not be verified.'
     if [[ "$root_mode" == no ]]; then
         root_effective="$(/usr/sbin/sshd -T -C "user=root,addr=$addr,host=$host" | awk '$1=="permitrootlogin" {print $2}')"
         [[ "$root_effective" == no ]] || fatal 'An SSH Match block permits root; restoring the original configuration.'
@@ -322,10 +323,16 @@ docker_ready() {
 
 socks_install() {
     header 'SOCKS5 proxy'
-    local port user password replace directory occupied
+    local port user password replace directory occupied access bind
     field port; field user; field password; field replace
+    access=public
+    if IFS= read -r -d '' access; then :; else access=public; fi
+    [[ "$access" == public || "$access" == private ]] || fatal 'Invalid SOCKS5 exposure mode.'
     port_ok "$port" || fatal 'Invalid port.'
     [[ "$user" =~ ^[a-zA-Z0-9_]{1,128}$ && "$password" =~ ^[a-zA-Z0-9_]{8,128}$ ]] || fatal 'SOCKS5 credentials must use letters, digits or underscores.'
+    if [[ "$access" == private ]]; then
+        python3 "$BASE_DIR/clients.py" socks-private-ready >/dev/null
+    fi
     docker_ready
     if docker inspect amnezia-socks5proxy >/dev/null 2>&1 && [[ "$replace" != yes ]]; then
         fatal 'SOCKS5 already exists. Explicit replacement is required.'
@@ -354,7 +361,9 @@ START
         docker rename amnezia-socks5proxy "$SOCKS_BACKUP"
     fi
     SOCKS_NEW=1
-    docker run -d --restart always -p "$port:$port/tcp" --name amnezia-socks5proxy amnezia-socks5proxy >/dev/null
+    bind="$port:$port/tcp"
+    if [[ "$access" == private ]]; then bind="127.0.0.1:$port:$port/tcp"; fi
+    docker run -d --restart always -p "$bind" --name amnezia-socks5proxy amnezia-socks5proxy >/dev/null
     SECRET_TMP="$(mktemp /run/ashapp.XXXXXXXXXX)"
     {
         printf 'config /usr/local/3proxy/conf/3proxy.cfg\n'
@@ -380,6 +389,8 @@ START
 
 case "$ACTION" in
     preflight) preflight ;;
+    security-status|security-preview|security-stage|security-confirm|security-rollback|security-unban)
+        python3 "$BASE_DIR/security_manager.py" "$ACTION" ;;
     dependencies) dependencies ;;
     upgrade) upgrade ;;
     root-password) root_password ;;

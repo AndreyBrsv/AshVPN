@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:ashapp/credential_vault.dart';
 import 'package:ashapp/remote_backend.dart';
@@ -124,6 +125,12 @@ class FakeServer {
   Completer<void>? gate;
   int socksPort = 1080;
   String socksUser = 'proxy', socksPassword = 'test-proxy-placeholder';
+  Map<String, dynamic> security = {
+    'fail2ban': {'enabled': false, 'managed': false, 'banned': <String>[]},
+    'firewall': {'enabled': false, 'managed': false},
+    'automatic_updates': {'enabled': false, 'managed': false},
+  };
+  Map<String, dynamic>? pendingSecurity;
 }
 
 class FakeBackend extends Fake implements RemoteBackend {
@@ -149,6 +156,54 @@ class FakeBackend extends Fake implements RemoteBackend {
       throw StateError(server.failureMessage);
     }
     switch (action) {
+      case 'security-status':
+        return {
+          ...server.security,
+          'ssh': server.state['ssh'],
+          'pending': server.pendingSecurity != null,
+        };
+      case 'security-preview':
+        return {
+          'digest': 'test-plan',
+          'ports': {
+            'tcp': [22],
+            'udp': [],
+          },
+          'notice': 'Test preview',
+        };
+      case 'security-stage':
+        server.pendingSecurity = jsonDecode(fields[0]) as Map<String, dynamic>;
+        return {'token': 'test-token', 'rollback_seconds': 180};
+      case 'security-confirm':
+        final changes = server.pendingSecurity!;
+        for (final feature in ['fail2ban', 'firewall', 'automatic_updates']) {
+          if (changes.containsKey(feature)) {
+            server.security[feature] = {
+              'enabled': changes[feature],
+              'managed': true,
+              'banned': <String>[],
+            };
+          }
+        }
+        final ssh = Map<String, dynamic>.from(server.state['ssh'] as Map);
+        if (changes.containsKey('disable_root')) {
+          ssh['permitrootlogin'] = changes['disable_root'] == true
+              ? 'no'
+              : 'yes';
+        }
+        if (changes.containsKey('disable_passwords')) {
+          ssh['passwordauthentication'] = changes['disable_passwords'] == true
+              ? 'no'
+              : 'yes';
+          ssh['kbdinteractiveauthentication'] =
+              changes['disable_passwords'] == true ? 'no' : 'yes';
+        }
+        server.state['ssh'] = ssh;
+        server.pendingSecurity = null;
+        return {'confirmed': true};
+      case 'security-rollback':
+        server.pendingSecurity = null;
+        return {'rolled_back': true};
       case 'preflight':
         return {'python': true};
       case 'status':
@@ -224,11 +279,15 @@ class FakeBackend extends Fake implements RemoteBackend {
         server.socksPort = int.parse(fields[0]);
         server.socksUser = fields[1];
         server.socksPassword = fields[2];
+        server.state['socks5_access'] = fields.length > 4
+            ? fields[4]
+            : 'public';
       case 'socks-info':
         return {
           'port': server.socksPort,
           'user': server.socksUser,
           'password': server.socksPassword,
+          'access': server.state['socks5_access'] ?? 'public',
         };
       case 'socks-control':
         server.state['socks5'] = fields[0] != 'stop';
@@ -275,6 +334,13 @@ class Harness {
     vault: CredentialVault(store),
     connector: connect,
     backendFactory: createBackend,
+    keyConnector: (details, confirmHost) => connect(
+      host: details.host,
+      port: details.port,
+      username: details.user,
+      password: '',
+      confirmHost: confirmHost,
+    ),
   );
   FakeServer get server => servers.putIfAbsent('203.0.113.10', FakeServer.new);
   Future<SshConnection> connect({

@@ -9,6 +9,34 @@ BASH = 'C:/Program Files/Git/bin/bash.exe' if Path('C:/Program Files/Git/bin/bas
 
 
 class SocksRollbackTests(unittest.TestCase):
+    def test_private_engine_preflight_precedes_build_or_container_mutation_and_public_is_unchanged(self):
+        source = (ROOT / 'server/remote.sh').read_text(encoding='utf-8')
+        ready = source[source.index('docker_ready() {'):source.index('\nsocks_install() {')]
+        install = source[source.index('socks_install() {'):source.index('\ncase "$ACTION" in')]
+        for mode in ('private', 'public'):
+            script = '''set -e
+BASE_DIR=/fake-ashapp
+header() { :; }
+field() { IFS= read -r -d '' "$1"; }
+port_ok() { return 0; }
+fatal() { exit 99; }
+python3() { printf 'PREFLIGHT %s\\n' "$*" >&2; return 86; }
+systemctl() { printf 'DAEMON_ACTIVATED\\n' >&2; }
+docker() { [[ "$1" == info ]]; }
+install() { printf 'MUTATION\\n' >&2; return 23; }
+''' + ready + install + '\nsocks_install\n'
+            result = subprocess.run([BASH, '-c', script], input='1080\0test\0test_placeholder\0yes\0' + mode + '\0',
+                                    capture_output=True, text=True)
+            if mode == 'private':
+                self.assertEqual(result.returncode, 86)
+                self.assertIn('clients.py socks-private-ready', result.stderr)
+                self.assertNotIn('MUTATION', result.stderr)
+                self.assertNotIn('DAEMON_ACTIVATED', result.stderr)
+            else:
+                self.assertEqual(result.returncode, 23)
+                self.assertNotIn('PREFLIGHT', result.stderr)
+                self.assertIn('DAEMON_ACTIVATED', result.stderr)
+
     def test_rollback_preserves_previous_running_or_stopped_state(self):
         source = (ROOT / 'server/remote.sh').read_text(encoding='utf-8')
         handler = source[source.index('on_error() {'):source.index('\nif [[ "$ACTION" == --help')]

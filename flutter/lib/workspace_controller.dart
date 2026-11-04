@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
@@ -13,6 +14,8 @@ import 'setup_secrets.dart';
 import 'ssh_connection.dart';
 import 'template_repository.dart';
 import 'vless_connection.dart';
+import 'ssh_identity.dart';
+import 'socks_tunnel.dart';
 
 typedef SshConnector = Future<SshConnection> Function({
   required String host,
@@ -38,11 +41,14 @@ class WorkspaceController extends ChangeNotifier {
     required this.vault,
     this.connector = SshConnection.connect,
     this.backendFactory = RemoteBackend.new,
+    this.keyConnector = SshConnection.connectWithKey,
   });
   final ServerProfiles profilesRepository;
   final TemplateRepository templatesRepository;
   final CredentialVault vault;
   final SshConnector connector;
+  final Future<SshConnection> Function(ConnectionDetails, ConfirmHost)
+  keyConnector;
   final RemoteBackend Function(SshConnection, String) backendFactory;
 
   /// The owning workspace reserves an endpoint before authentication starts.
@@ -56,6 +62,13 @@ class WorkspaceController extends ChangeNotifier {
   bool busy = false, remember = true, setupComplete = false, _disposed = false;
   String message = 'Choose a server to get started.', error = '', log = '';
   Map<String, dynamic> server = {};
+  Map<String, dynamic>? security;
+  String securityError = '';
+  bool securityPending = false;
+  SocksTunnel? socksTunnel;
+  Timer? _progressTimer;
+  final _operationClock = Stopwatch();
+  Duration get elapsed => _operationClock.elapsed;
   List<Map<String, dynamic>> clients = [], users = [];
   List<String> clientWarnings = [];
   String clientsError = '';
@@ -92,6 +105,14 @@ class WorkspaceController extends ChangeNotifier {
       return false;
     }
     busy = true;
+    tasks = [];
+    _operationClock
+      ..reset()
+      ..start();
+    _progressTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _notify(),
+    );
     error = '';
     _notify();
     try {
@@ -108,6 +129,8 @@ class WorkspaceController extends ChangeNotifier {
       return false;
     } finally {
       busy = false;
+      _operationClock.stop();
+      _progressTimer?.cancel();
       _notify();
     }
   }
@@ -197,26 +220,36 @@ class WorkspaceController extends ChangeNotifier {
   RemoteBackend get _active =>
       connected ? _backend! : (throw StateError('Connect to a server first.'));
 
-  Future<bool> connect(ConnectionDetails details, ConfirmHost confirmHost) =>
-      _guard(() async {
-        if (details.host.isEmpty ||
-            details.user.isEmpty ||
-            details.password.isEmpty ||
-            details.port < 1 ||
-            details.port > 65535) {
-          throw StateError('Enter the address, port, username and password.');
-        }
-        ServerProfile.fromJson({'ip': details.host, 'ssh_port': details.port});
-        beforeConnect?.call(details);
-        message = 'Connecting…';
-        _notify();
-        final next = await connector(
+  Future<SshConnection> _connectUsing(
+    ConnectionDetails details,
+    ConfirmHost confirmHost,
+  ) => details.usesKey
+      ? keyConnector(details, confirmHost)
+      : connector(
           host: details.host,
           port: details.port,
           username: details.user,
           password: details.password,
           confirmHost: confirmHost,
         );
+
+  Future<bool> connect(ConnectionDetails details, ConfirmHost confirmHost) =>
+      _guard(() async {
+        if (details.host.isEmpty ||
+            details.user.isEmpty ||
+            (details.password.isEmpty && !details.usesKey) ||
+            details.port < 1 ||
+            details.port > 65535) {
+          throw StateError('Enter the address, port, username and password.');
+        }
+        ServerProfile.fromJson({'ip': details.host, 'ssh_port': details.port});
+        if (details.usesKey) {
+          SshIdentity.parse(details.privateKey, details.keyPassphrase);
+        }
+        beforeConnect?.call(details);
+        message = 'Connecting…';
+        _notify();
+        final next = await _connectUsing(details, confirmHost);
         final backend = backendFactory(next, details.user);
         try {
           final preflight = await backend.run('preflight');
@@ -249,6 +282,8 @@ class WorkspaceController extends ChangeNotifier {
   Future<void> _adopt(RemoteBackend next, ConnectionDetails details) async {
     await _output?.cancel();
     final old = _backend;
+    await socksTunnel?.close();
+    socksTunnel = null;
     _backend = next;
     ssh = details;
     socks = null;
@@ -258,11 +293,14 @@ class WorkspaceController extends ChangeNotifier {
     clientsError = '';
     users = [];
     server = {};
+    security = null;
+    securityPending = false;
     setupComplete = false;
     tasks = [];
     log = '';
     _secrets.clear();
     _secrets.add(details.password);
+    _secrets.addAll([details.privateKey, details.keyPassphrase]);
     _output = next.output.stream.listen(_append);
     _watchConnection(next);
     if (old != null && !identical(old, next)) {
@@ -303,6 +341,9 @@ class WorkspaceController extends ChangeNotifier {
       clientsError = '';
       users = [];
       server = {};
+      security = null;
+      unawaited(socksTunnel?.close());
+      socksTunnel = null;
       setupComplete = false;
       message = 'SSH connection closed. Reconnect to inspect the server.';
       unawaited(backend.close());
@@ -318,6 +359,8 @@ class WorkspaceController extends ChangeNotifier {
   }
 
   Future<bool> disconnect() => _guard(() async {
+    await socksTunnel?.close();
+    socksTunnel = null;
     await _output?.cancel();
     _output = null;
     final old = _backend;
@@ -332,6 +375,7 @@ class WorkspaceController extends ChangeNotifier {
     clientsError = '';
     users = [];
     server = {};
+    security = null;
     log = '';
     tasks = [];
     _secrets.clear();
@@ -362,7 +406,190 @@ class WorkspaceController extends ChangeNotifier {
     }
     final result = await _active.run('users');
     users = List<Map<String, dynamic>>.from(result['users'] as List? ?? []);
+    await _securityStatus();
   }
+
+  Future<void> _securityStatus() async {
+    security = null;
+    securityError = '';
+    try {
+      security = await _active.run('security-status');
+      securityPending = security?['pending'] == true;
+    } catch (_) {
+      securityError = 'Security status is unknown. Check the connection and retry diagnostics.';
+    }
+  }
+
+  Future<bool> diagnoseSecurity() => _guard(() async {
+    message = 'Checking server security…';
+    await _securityStatus();
+    if (security == null) throw StateError(securityError);
+    message = 'Security diagnostics refreshed.';
+  });
+
+  Future<Map<String, dynamic>?> previewSecurity(
+    Map<String, bool> changes,
+  ) async {
+    Map<String, dynamic>? result;
+    await _guard(() async {
+      result = await _active.run('security-preview', [jsonEncode(changes)]);
+    });
+    return result;
+  }
+
+  Future<void> _securityApply(
+    Map<String, bool> changes, {
+    String? expected,
+  }) async {
+    if (changes['disable_passwords'] == true && !_login.usesKey) {
+      throw StateError(
+        'Connect with a verified SSH key before disabling password login.',
+      );
+    }
+    if (changes['disable_root'] == true && _login.user == 'root') {
+      throw StateError(
+        'Connect as an administrator before disabling root SSH.',
+      );
+    }
+    // Verify the recovery credential before staging any network policy.
+    final proof = await _connectUsing(_login, (_, _) async => false);
+    final proofBackend = backendFactory(proof, _login.user);
+    try {
+      await proofBackend.run('preflight');
+    } finally {
+      await proofBackend.close();
+      await proof.close();
+    }
+    if (changes['disable_passwords'] == true) {
+      final recovery = _login;
+      await vault.saveConnection(recovery);
+      final saved = await vault.connection(recovery.host, recovery.port);
+      if (saved == null ||
+          saved.user != recovery.user ||
+          saved.privateKey != recovery.privateKey ||
+          saved.keyPassphrase != recovery.keyPassphrase) {
+        throw StateError(
+          'Save and verify the active SSH key in the OS vault before disabling passwords.',
+        );
+      }
+      remember = true;
+    }
+    final plan = expected == null
+        ? await _active.run('security-preview', [jsonEncode(changes)])
+        : null;
+    securityPending = true;
+    final Map<String, dynamic> staged;
+    try {
+      staged = await _active.run('security-stage', [
+        jsonEncode(changes),
+        expected ?? plan!['digest'] as String,
+      ]);
+    } catch (_) {
+      await _securityStatus();
+      rethrow;
+    }
+    final token = staged['token'] as String;
+    try {
+      final fresh = await _connectUsing(_login, (_, _) async => false);
+      final check = backendFactory(fresh, _login.user);
+      try {
+        await check.run('preflight');
+        final confirmed = await check.run('security-confirm', [token]);
+        if (confirmed['confirmed'] != true) {
+          throw StateError('Security confirmation failed.');
+        }
+      } finally {
+        await check.close();
+        await fresh.close();
+      }
+    } catch (_) {
+      try {
+        await _active.run('security-rollback', [token]);
+      } catch (_) {
+        /* Server timer retains recovery. */
+      }
+      await _securityStatus();
+      rethrow;
+    }
+    await _securityStatus();
+  }
+
+  Future<bool> applySecurity(Map<String, bool> changes, String digest) =>
+      _guard(() async {
+        tasks = [
+          SetupTask('Verify access, apply and confirm security settings'),
+          SetupTask('Refresh diagnostics'),
+        ];
+        tasks[0].state = TaskState.running;
+        _notify();
+        try {
+          await _securityApply(changes, expected: digest);
+          tasks[0].state = TaskState.done;
+        } catch (_) {
+          tasks[0].state = TaskState.failed;
+          rethrow;
+        }
+        tasks[1].state = TaskState.running;
+        _notify();
+        await _refresh();
+        tasks[1].state = TaskState.done;
+        message = 'Security settings confirmed through a new SSH connection.';
+      });
+
+  Future<bool> unbanAddress(String address) => _guard(() async {
+    await _active.run('security-unban', [address]);
+    await _securityStatus();
+    message = 'Address removed from the Ashapp SSH jail.';
+  });
+
+  Future<void> _installIdentity(String pem, String passphrase) async {
+    final identity = SshIdentity.parse(pem, passphrase);
+    _secrets.addAll([pem, passphrase]);
+    await _active.run('ssh-key', [_login.user, identity.publicKey]);
+    final candidate = ConnectionDetails(
+      host: _login.host,
+      port: _login.port,
+      user: _login.user,
+      password: _login.password,
+      privateKey: pem,
+      keyPassphrase: passphrase,
+    );
+    final fresh = await _connectUsing(candidate, (_, _) async => false);
+    final backend = backendFactory(fresh, candidate.user);
+    try {
+      await backend.run('preflight');
+      // A recoverable key must be saved before a password-denial operation.
+      await vault.saveConnection(candidate);
+    } catch (_) {
+      await backend.close();
+      await fresh.close();
+      rethrow;
+    }
+    final old = _active;
+    await socksTunnel?.close();
+    socksTunnel = null;
+    socks = null;
+    await _output?.cancel();
+    _backend = backend;
+    ssh = candidate;
+    remember = true;
+    _output = backend.output.stream.listen(_append);
+    _watchConnection(backend);
+    await old.close();
+    await old.connection.close();
+  }
+
+  Future<bool> installSshIdentity(
+    String pem,
+    String passphrase, {
+    bool generate = false,
+  }) => _guard(() async {
+    final identity = generate
+        ? SshIdentity.generate()
+        : SshIdentity.parse(pem, passphrase);
+    await _installIdentity(identity.privateKey, generate ? '' : passphrase);
+    message = 'SSH key saved in the OS vault; independent key login and sudo verified.';
+  });
 
   Future<bool> refresh() => _guard(() async {
     await _refresh();
@@ -385,19 +612,22 @@ class WorkspaceController extends ChangeNotifier {
       port: details.port,
       user: name,
       password: password,
+      privateKey: details.privateKey,
+      keyPassphrase: details.keyPassphrase,
     );
     savedAccount = changed;
     if (details.user == name) ssh = changed;
     // The password has already changed remotely, even if later verification fails.
     await _rememberLogin(additional: changed);
     await old.run('ssh-config', [name, 'keep']);
-    final checked = await connector(
-      host: details.host,
-      port: details.port,
-      username: name,
-      password: password,
-      confirmHost: (_, _) async => false,
-    );
+    if (details.usesKey) {
+      final identity = SshIdentity.parse(
+        details.privateKey,
+        details.keyPassphrase,
+      );
+      await old.run('ssh-key', [name, identity.publicKey]);
+    }
+    final checked = await _connectUsing(changed, (_, _) async => false);
     final backend = backendFactory(checked, name);
     try {
       await backend.run('preflight'); // Includes actual sudo -n verification.
@@ -408,14 +638,12 @@ class WorkspaceController extends ChangeNotifier {
       rethrow;
     }
     // Adopt the verified login without clearing setup progress or service results.
+    await socksTunnel?.close();
+    socksTunnel = null;
+    socks = null;
     await _output?.cancel();
     _backend = backend;
-    ssh = ConnectionDetails(
-      host: details.host,
-      port: details.port,
-      user: name,
-      password: password,
-    );
+    ssh = changed;
     _output = backend.output.stream.listen(_append);
     _watchConnection(backend);
     await old.close();
@@ -438,21 +666,7 @@ class WorkspaceController extends ChangeNotifier {
         'Use a verified administrator before disabling root SSH.',
       );
     }
-    final checked = await connector(
-      host: details.host,
-      port: details.port,
-      username: details.user,
-      password: details.password,
-      confirmHost: (_, _) async => false,
-    );
-    final backend = backendFactory(checked, details.user);
-    try {
-      await backend.run('preflight');
-      await backend.run('ssh-config', [details.user, 'no']);
-    } finally {
-      await backend.close();
-      await checked.close();
-    }
+    await _securityApply({'disable_root': true});
   }
 
   Future<bool> disableRoot() => _guard(() async {
@@ -475,7 +689,14 @@ class WorkspaceController extends ChangeNotifier {
     );
     savedAccount = root;
     if (details.user == 'root') {
-      ssh = root;
+      ssh = ConnectionDetails(
+        host: details.host,
+        port: details.port,
+        user: 'root',
+        password: password,
+        privateKey: details.privateKey,
+        keyPassphrase: details.keyPassphrase,
+      );
     }
     await _rememberLogin(additional: root);
   }
@@ -498,12 +719,26 @@ class WorkspaceController extends ChangeNotifier {
     message = 'Saved account credentials loaded.';
   });
 
+  bool get managesFirewall =>
+      (security?['firewall'] as Map?)?['managed'] == true;
+  bool _activatesService(ServerTemplate answers) =>
+      (answers.installAwg && server['awg_configured'] != true) ||
+      (answers.installVless &&
+          (server['vless_configured'] != true || server['vless'] != true)) ||
+      (answers.installSocks &&
+          (server['socks5_configured'] != true || server['socks5'] != true));
+  bool needsFirewallRefresh(ServerTemplate answers) =>
+      managesFirewall && _activatesService(answers);
+
   Future<bool> provision(
     ServerTemplate answers,
     SetupSecrets secrets,
   ) => _guard(() async {
     final validation = secrets.validate(answers, activeUser: _login.user);
     if (validation != null) throw StateError(validation);
+    if (!answers.generateSshKey && secrets.sshPrivateKey.isNotEmpty) {
+      SshIdentity.parse(secrets.sshPrivateKey, secrets.sshKeyPassphrase);
+    }
     _secrets.addAll([
       secrets.rootPassword,
       secrets.adminPassword,
@@ -529,6 +764,17 @@ class WorkspaceController extends ChangeNotifier {
         'Inspect server',
         () async {
           server = await _active.run('status');
+          await _securityStatus();
+          if (_activatesService(answers) && security == null) {
+            throw StateError(
+              'Security diagnostics must succeed before adding a network service.',
+            );
+          }
+          if (needsFirewallRefresh(answers) && !answers.configureFirewall) {
+            throw StateError(
+              'Select Configure firewall to review and refresh the existing Ashapp allowlist for the new service.',
+            );
+          }
           if (answers.installSocks &&
               server['vless_configured'] == true &&
               server['vless_port'] == answers.socksPort) {
@@ -558,6 +804,21 @@ class WorkspaceController extends ChangeNotifier {
               'The server needs a reboot. Reboot it, reconnect, then run setup again.',
             );
           }
+          if (answers.protectSsh ||
+              answers.configureFirewall ||
+              answers.automaticUpdates ||
+              answers.disablePasswordLogin ||
+              answers.disableRoot) {
+            await _active.run('security-preview', [
+              jsonEncode({
+                if (answers.protectSsh) 'fail2ban': true,
+                if (answers.configureFirewall) 'firewall': true,
+                if (answers.automaticUpdates) 'automatic_updates': true,
+                if (answers.disablePasswordLogin) 'disable_passwords': true,
+                if (answers.disableRoot) 'disable_root': true,
+              }),
+            ]);
+          }
         },
       ),
       if (answers.changeRootPassword)
@@ -572,6 +833,19 @@ class WorkspaceController extends ChangeNotifier {
           'Install optional SSH key',
           () async {
             await _active.run('ssh-key', [_login.user, secrets.sshPublicKey]);
+          },
+        ),
+      if (answers.generateSshKey || secrets.sshPrivateKey.isNotEmpty)
+        (
+          'Install and verify SSH key',
+          () async {
+            final pem = answers.generateSshKey
+                ? SshIdentity.generate().privateKey
+                : secrets.sshPrivateKey;
+            await _installIdentity(
+              pem,
+              answers.generateSshKey ? '' : secrets.sshKeyPassphrase,
+            );
           },
         ),
       if (answers.disableRoot) ('Disable root SSH login', _disableRoot),
@@ -626,6 +900,7 @@ class WorkspaceController extends ChangeNotifier {
                 secrets.socksUser,
                 secrets.socksPassword,
                 'no',
+                answers.socksAccess,
               ]);
             }
             await _active.run('socks-check');
@@ -683,6 +958,19 @@ class WorkspaceController extends ChangeNotifier {
               }
             }
           },
+        ),
+      if (answers.protectSsh ||
+          answers.configureFirewall ||
+          answers.automaticUpdates ||
+          answers.disablePasswordLogin)
+        (
+          'Apply and confirm security protection',
+          () => _securityApply({
+            if (answers.protectSsh) 'fail2ban': true,
+            if (answers.configureFirewall) 'firewall': true,
+            if (answers.automaticUpdates) 'automatic_updates': true,
+            if (answers.disablePasswordLogin) 'disable_passwords': true,
+          }),
         ),
       (
         'Verify final configuration',
@@ -889,13 +1177,43 @@ class WorkspaceController extends ChangeNotifier {
   Future<void> _readSocks() async {
     final result = await _active.run('socks-info');
     socks = ConnectionDetails(
-      host: _login.host,
-      port: result['port'] as int,
+      host: result['access'] == 'private' ? '127.0.0.1' : _login.host,
+      port: result['access'] == 'private' && socksTunnel != null
+          ? socksTunnel!.port
+          : result['port'] as int,
       user: result['user'] as String,
       password: result['password'] as String,
     );
     _secrets.add(socks!.password);
+    server['socks5_access'] = result['access'] ?? 'public';
   }
+
+  Future<bool> startSocksTunnel() => _guard(() async {
+    await socksTunnel?.close();
+    socksTunnel = null;
+    await _readSocks();
+    if (server['socks5_access'] != 'private') {
+      throw StateError('Select private SOCKS5 access first.');
+    }
+    socksTunnel = await SocksTunnel.start(
+      _active.connection.client,
+      socks!.port,
+    );
+    socks = ConnectionDetails(
+      host: '127.0.0.1',
+      port: socksTunnel!.port,
+      user: socks!.user,
+      password: socks!.password,
+    );
+    message =
+        'Private SOCKS5 tunnel is running on 127.0.0.1:${socksTunnel!.port}. Keep Ashapp connected.';
+  });
+  Future<bool> stopSocksTunnel() => _guard(() async {
+    await socksTunnel?.close();
+    socksTunnel = null;
+    socks = null;
+    message = 'Private SOCKS5 tunnel stopped.';
+  });
 
   Future<bool> readSocks() => _guard(_readSocks);
   Future<bool> configureSocks(
@@ -903,8 +1221,10 @@ class WorkspaceController extends ChangeNotifier {
     String user,
     String password, {
     bool replace = false,
+    String access = 'public',
   }) => _guard(() async {
-    if (port < 1 ||
+    if (!{'public', 'private'}.contains(access) ||
+        port < 1 ||
         port > 65535 ||
         port == _login.port ||
         (server['vless_configured'] == true && server['vless_port'] == port) ||
@@ -915,16 +1235,22 @@ class WorkspaceController extends ChangeNotifier {
       );
     }
     _secrets.add(password);
+    await socksTunnel?.close();
+    socksTunnel = null;
     await _active.run('dependencies');
     await _active.run('socks-install', [
       '$port',
       user,
       password,
       replace ? 'yes' : 'no',
+      access,
     ]);
     await _active.run('socks-check');
     await _readSocks();
     await _refresh();
+    if ((security?['firewall'] as Map?)?['managed'] == true) {
+      await _securityApply({'firewall': true});
+    }
     message = 'SOCKS5 credentials verified.';
   });
   Future<bool> service(String kind, String operation) => _guard(() async {
@@ -933,6 +1259,9 @@ class WorkspaceController extends ChangeNotifier {
       throw StateError('Invalid service command.');
     }
     await _active.run('$kind-control', [operation]);
+    if (operation != 'stop' && managesFirewall) {
+      await _securityApply({'firewall': true});
+    }
     await _refresh();
     message = 'Service $operation completed.';
   });
@@ -950,6 +1279,9 @@ class WorkspaceController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(socksTunnel?.close());
+    socksTunnel = null;
+    _progressTimer?.cancel();
     _output?.cancel();
     final old = _backend;
     _backend = null;

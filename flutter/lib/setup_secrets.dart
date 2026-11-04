@@ -11,9 +11,12 @@ class SetupSecrets {
     this.socksUser = '',
     this.socksPassword = '',
     this.sshPublicKey = '',
+    this.sshPrivateKey = '',
+    this.sshKeyPassphrase = '',
   });
   final String connectionUser, connectionPassword, rootPassword;
   final String adminName, adminPassword, socksUser, socksPassword, sshPublicKey;
+  final String sshPrivateKey, sshKeyPassphrase;
 
   Map<String, String> toVault() => {
     'connection_user': connectionUser,
@@ -24,6 +27,8 @@ class SetupSecrets {
     'socks_user': socksUser,
     'socks_password': socksPassword,
     'ssh_public_key': sshPublicKey,
+    'ssh_private_key': sshPrivateKey,
+    'ssh_key_passphrase': sshKeyPassphrase,
   };
   factory SetupSecrets.fromVault(Map<String, dynamic> json) {
     if (json.values.any((value) => value is! String)) {
@@ -38,10 +43,17 @@ class SetupSecrets {
       socksUser: json['socks_user'] as String? ?? '',
       socksPassword: json['socks_password'] as String? ?? '',
       sshPublicKey: json['ssh_public_key'] as String? ?? '',
+      sshPrivateKey: json['ssh_private_key'] as String? ?? '',
+      sshKeyPassphrase: json['ssh_key_passphrase'] as String? ?? '',
     );
   }
 
   String? validate(ServerTemplate answers, {String? activeUser}) {
+    if (answers.disablePasswordLogin &&
+        !answers.generateSshKey &&
+        sshPrivateKey.isEmpty) {
+      return 'Generate or import an SSH private key before disabling password login.';
+    }
     if (answers.installVless &&
         (answers.vlessPort == answers.sshPort ||
             (answers.installSocks && answers.vlessPort == answers.socksPort))) {

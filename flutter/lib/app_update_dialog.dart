@@ -114,7 +114,7 @@ class AppUpdateDialog extends StatelessWidget {
                 if (ready && !canInstall()) ...[
                   const SizedBox(height: 16),
                   const Text(
-                    'Finish tasks on all servers and close setup/connection dialogs before installing.',
+                    'Finish tasks on all servers, stop private SOCKS5 tunnels and close setup/connection dialogs before installing.',
                   ),
                 ],
                 const SizedBox(height: 24),

@@ -52,6 +52,8 @@ class CredentialVault {
         'user': details.user,
         'password': details.password,
         'accounts': accounts,
+        'private_key': details.privateKey,
+        'key_passphrase': details.keyPassphrase,
       }),
     );
   }
@@ -62,7 +64,10 @@ class CredentialVault {
     final value = jsonDecode(raw);
     if (value is! Map<String, dynamic> ||
         value['user'] is! String ||
-        value['password'] is! String) {
+        value['password'] is! String ||
+        (value['private_key'] != null && value['private_key'] is! String) ||
+        (value['key_passphrase'] != null &&
+            value['key_passphrase'] is! String)) {
       throw const FormatException('Invalid saved credentials.');
     }
     _accounts(value);
@@ -105,6 +110,8 @@ class CredentialVault {
       port: port,
       user: json['user'] as String,
       password: json['password'] as String,
+      privateKey: json['private_key'] as String? ?? '',
+      keyPassphrase: json['key_passphrase'] as String? ?? '',
     );
   }
 
