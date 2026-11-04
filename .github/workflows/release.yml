@@ -3,12 +3,12 @@ name: Verify and release
 on:
   push:
     branches: [main]
-    tags: [v0.0.8]
+    tags: [v0.0.9]
   pull_request:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish v0.0.8 after all three native builds succeed
+        description: Publish v0.0.9 after all three native builds succeed
         type: boolean
         default: false
 
@@ -121,6 +121,9 @@ jobs:
           fi
       - name: Package native release
         run: python tool/package_release.py ${{ matrix.target }}
+      - name: Smoke test Windows installer in disposable CI profile
+        if: runner.os == 'Windows'
+        run: python tool/smoke_windows_installer.py
       - name: Attest native archive provenance
         if: github.event_name != 'pull_request' && !github.event.repository.private
         uses: actions/attest@4d7d407517fe0a9f57ab8ca277dfd2efb1188c7f
@@ -161,20 +164,20 @@ jobs:
       - uses: actions/attest@4d7d407517fe0a9f57ab8ca277dfd2efb1188c7f
         if: '!github.event.repository.private'
         with:
-          subject-path: release-output/Ashapp-v0.0.8-source.zip
+          subject-path: release-output/Ashapp-v0.0.9-source.zip
       - name: Publish verified assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if git rev-parse --verify refs/tags/v0.0.8 >/dev/null 2>&1; then
-            test "$(git rev-parse 'refs/tags/v0.0.8^{commit}')" = "$GITHUB_SHA"
+          if git rev-parse --verify refs/tags/v0.0.9 >/dev/null 2>&1; then
+            test "$(git rev-parse 'refs/tags/v0.0.9^{commit}')" = "$GITHUB_SHA"
           fi
-          if gh release view v0.0.8 --json isDraft,targetCommitish >/dev/null 2>&1; then
-            test "$(gh release view v0.0.8 --json isDraft --jq .isDraft)" = true
-            test "$(gh release view v0.0.8 --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
-            gh release upload v0.0.8 release-output/* --clobber
+          if gh release view v0.0.9 --json isDraft,targetCommitish >/dev/null 2>&1; then
+            test "$(gh release view v0.0.9 --json isDraft --jq .isDraft)" = true
+            test "$(gh release view v0.0.9 --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
+            gh release upload v0.0.9 release-output/* --clobber
           else
-            gh release create v0.0.8 release-output/* --draft --target "$GITHUB_SHA" --title "Ashapp v0.0.8" --notes-file docs/RELEASE_NOTES.md
+            gh release create v0.0.9 release-output/* --draft --target "$GITHUB_SHA" --title "Ashapp v0.0.9" --notes-file docs/RELEASE_NOTES.md
           fi
-          gh release edit v0.0.8 --draft=false --latest
+          gh release edit v0.0.9 --draft=false --latest

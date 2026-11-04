@@ -39,17 +39,8 @@ class WorkspaceShell extends StatelessWidget {
       final colors = Theme.of(context).colorScheme;
       return Scaffold(
         appBar: AppBar(
-          leading: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Image.asset(
-              'assets/branding/app_icon.png',
-              excludeFromSemantics: true,
-            ),
-          ),
-          titleSpacing: 0,
-          title: const Text('Ashapp'),
-          titleTextStyle: Theme.of(context).textTheme.titleLarge
-              ?.copyWith(fontWeight: FontWeight.w600, color: colors.onSurface),
+          automaticallyImplyLeading: false,
+          toolbarHeight: 48,
           actions: [...actions, const SizedBox(width: 8)],
         ),
         bottomNavigationBar: compact

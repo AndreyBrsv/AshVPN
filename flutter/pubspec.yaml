@@ -1,7 +1,7 @@
 name: ashapp
 description: Ashapp desktop server setup application.
 publish_to: none
-version: 0.0.8+8
+version: 0.0.9+9
 environment:
   sdk: '>=3.13.0 <4.0.0'
 dependencies:

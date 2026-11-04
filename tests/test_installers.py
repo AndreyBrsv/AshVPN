@@ -13,6 +13,12 @@ from build_installers import build_installer, build_macos_helper, build_macos_ma
 
 
 class InstallerTests(unittest.TestCase):
+    def test_wizard_initialization_does_not_expand_uninitialized_app_constant(self):
+        source = (ROOT / 'tool/windows_setup.iss').read_text()
+        initialization = source.split('procedure InitializeWizard;', 1)[1].split('function NextButtonClick', 1)[0]
+        self.assertNotIn("ExpandConstant('{app}", initialization)
+        self.assertIn("ExpandConstant('{localappdata}\\Programs\\Ashapp\\unins000.exe')", initialization)
+
     def test_macos_helper_compiles_requested_arch_without_sandbox_inheritance(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

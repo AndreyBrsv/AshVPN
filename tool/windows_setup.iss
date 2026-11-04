@@ -79,8 +79,12 @@ end;
 procedure InitializeWizard;
 var
   Version: Cardinal;
+  Installed: Boolean;
 begin
-  if (not WizardSilent) and FileExists(ExpandConstant('{app}\unins000.exe')) then begin
+  { The destination-dependent app constant is not available here. Use the
+    fixed per-user install location, which is valid throughout initialization. }
+  Installed := FileExists(ExpandConstant('{localappdata}\Programs\Ashapp\unins000.exe'));
+  if (not WizardSilent) and Installed then begin
     Maintenance := CreateInputOptionPage(wpWelcome, 'Maintain Ashapp',
       'Ashapp is already installed',
       'Update the application, or remove it from this computer. Your VPS servers are never changed.', True, False);
