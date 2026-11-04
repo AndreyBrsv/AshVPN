@@ -122,7 +122,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(vm.phase, UpdatePhase.ready);
       FilledButton installButton() => tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, 'Install update…'),
+        find.widgetWithText(FilledButton, 'Restart and update'),
       );
       expect(installButton().onPressed, isNull);
       expect(
@@ -133,7 +133,7 @@ void main() {
       workspace.notifyListeners();
       await tester.pumpAndSettle();
       expect(installButton().onPressed, isNotNull);
-      await tester.tap(find.text('Install update…'));
+      await tester.tap(find.text('Restart and update'));
       await tester.pumpAndSettle();
       expect(
         find.textContaining('disconnect all SSH sessions'),
@@ -143,9 +143,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(runtime.opened, 0);
       expect(vm.phase, UpdatePhase.ready);
-      await tester.tap(find.text('Install update…'));
+      await tester.tap(find.text('Restart and update'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Open installer'));
+      await tester.tap(find.text('Restart and update').last);
       await tester.pumpAndSettle();
       expect(runtime.opened, 1);
       expect(runtime.quits, 1);

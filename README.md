@@ -10,19 +10,19 @@ Open source under the [MIT license](LICENSE). Targets: Windows x64, macOS Intel 
 
 Ashapp installs **AmneziaWG as a Linux kernel module** and/or **VLESS + Reality + XTLS Vision**, manages per-device access and optionally runs an authenticated SOCKS5 proxy in Docker. Both VPN protocols can run on one VPS as independent services. Multiple SSH connections retain independent state, including servers sharing an IP with different SSH ports. The app does not buy VPS instances or run a local VPN tunnel.
 
-## Download v0.0.7
+## Download v0.0.8
 
-**v0.0.7** adds SSH-key authentication, optional SSH brute-force protection, reversible security settings with a reconnect-confirmation deadline, per-server diagnostics, private SOCKS5 over SSH and step-based progress. Automatic OS security updates and disabling password SSH login are **off by default**. The links below are release targets; downloads become available only after Windows x64 and both macOS builds pass CI and publication completes. Fresh-VPS deployment and recovery remain unverified; see [security settings and limitations](docs/SERVER_SECURITY.md).
+**v0.0.8** adds background updates and installer maintenance, while retaining v0.0.7 server-security features. The existing logo/header layout is unchanged; its refinement is planned for v0.0.9. Automatic OS security updates and disabling password SSH login are **off by default**. The links below are v0.0.8 release targets; downloads become available only after Windows x64 and both macOS builds pass CI and publication completes. Fresh-VPS deployment and recovery remain unverified; see [security settings and limitations](docs/SERVER_SECURITY.md).
 
 This repository and its releases are **public**. Downloads are published after all three native checks succeed. A source ZIP is not an application installer.
 
 | Computer | Installer | Complete portable archive |
 | --- | --- | --- |
-| Windows 10/11 x64 | [Install Windows](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-windows-x64-setup.exe) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-windows-x64.zip) |
-| macOS 12+, Intel | [Install macOS Intel](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-x64-setup.pkg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-x64.zip) |
-| macOS 12+, Apple Silicon | [Install macOS Apple Silicon](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-arm64-setup.pkg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-macos-arm64.zip) |
+| Windows 10/11 x64 | [Install Windows](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/Ashapp-v0.0.8-windows-x64-setup.exe) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/Ashapp-v0.0.8-windows-x64.zip) |
+| macOS 12+, Intel | [Install / maintain macOS Intel](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/Ashapp-v0.0.8-macos-x64-maintenance.dmg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/Ashapp-v0.0.8-macos-x64.zip) |
+| macOS 12+, Apple Silicon | [Install / maintain macOS Apple Silicon](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/Ashapp-v0.0.8-macos-arm64-maintenance.dmg) | [ZIP](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/Ashapp-v0.0.8-macos-arm64.zip) |
 
-[Release page](https://github.com/AndreyBrsv/Ashapp/releases/tag/v0.0.7) · [SHA256SUMS](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/SHA256SUMS) · [Matching source](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.7/Ashapp-v0.0.7-source.zip)
+[Release page](https://github.com/AndreyBrsv/Ashapp/releases/tag/v0.0.8) · [SHA256SUMS](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/SHA256SUMS) · [Matching source](https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.8/Ashapp-v0.0.8-source.zip)
 
 **Windows:** run Setup and open Ashapp from the Start menu. For the portable ZIP instead, extract the entire archive and open `ashapp.exe`; keep its DLLs and `data` directory beside it. If a runtime is missing, install the official [Microsoft Visual C++ x64 Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe); see [Microsoft's documentation](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). Flutter, Python, Docker and C++ Build Tools are not required on the computer running the packaged app. The Windows application is not Authenticode-signed.
 
@@ -33,7 +33,7 @@ This repository and its releases are **public**. Downloads are published after a
 Download the ZIP and `SHA256SUMS` from the same release. In PowerShell, compare the output with its checksum line:
 
 ```powershell
-Get-FileHash .\Ashapp-v0.0.7-windows-x64.zip -Algorithm SHA256
+Get-FileHash .\Ashapp-v0.0.8-windows-x64.zip -Algorithm SHA256
 ```
 
 On macOS, put the ZIP and checksum file in one directory:
@@ -47,7 +47,7 @@ A checksum detects changed bytes. It does not independently prove the builder's 
 Public release builds publish [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations) when the workflow supports them. Check the matching tag and build manifest. For a build that actually published an attestation, use the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-gh attestation verify Ashapp-v0.0.7-windows-x64.zip --repo AndreyBrsv/Ashapp
+gh attestation verify Ashapp-v0.0.8-windows-x64.zip --repo AndreyBrsv/Ashapp
 ```
 
 Inspect the reported source commit and compare it with the release tag and build manifest. Public CI makes the build process inspectable; byte-for-byte reproducible builds are not claimed. GitHub workflow attestations require no private signing keys in this repository.
@@ -66,15 +66,19 @@ The shared [Ashapp logo and desktop icons](branding/README.md) use the warm Carb
 
 ## App updates
 
+**v0.0.8** adds **Restart and update**, Windows Setup maintenance choices and macOS maintenance disks. Updating preserves local data and reopens the installed app after success. System security/administrator prompts remain. The first update from v0.0.7 still uses its old installer handoff; test the new background flow from v0.0.8 to a later release.
+
+Windows Setup offers **Update / repair** or **Uninstall**. macOS users can open **Ashapp Setup** in the maintenance DMG for the same choices; the PKG remains available for older updaters. An unchecked option also removes this user's local settings and protected passwords. Older installed versions need one update before full-data removal is available. VPS servers and files exported elsewhere remain unchanged. Installation/removal and credential-retention behavior still require manual end-to-end validation.
+
 Version 0.0.4 adds a **Check for updates** button in the top toolbar. Press it to check GitHub immediately and see the result. It changes to **Update available** when a new version is found. Stable releases are also checked once a day, with an optional automatic-check toggle and **Check now** in the update dialog. Downloads and installation always require your approval; checking does not send server addresses, SSH usernames, passwords or VPN keys to GitHub.
 
-Choose **Download update**, then **Install update…**. Ashapp selects Windows x64, macOS Intel or macOS Apple Silicon for its running process, verifies the installer against GitHub's SHA-256 digest, `SHA256SUMS` and the source build manifest, and checks the file again before opening it. Interrupted, cancelled or invalid downloads are discarded. Installation is blocked while any server has an active task, including an unselected server. Once installation starts, all new server operations are paused.
+In published v0.0.7, choose **Download update**, then **Install update…**. Ashapp selects Windows x64, macOS Intel or macOS Apple Silicon for its running process, verifies the installer against GitHub's SHA-256 digest, `SHA256SUMS` and the source build manifest, and checks the file again before opening it. Interrupted, cancelled or invalid downloads are discarded. Installation is blocked while any server has an active task, including an unselected server. Once installation starts, all new server operations are paused.
 
 Ashapp opens Windows Setup or macOS Installer and closes itself. Complete that system dialog, then reopen the app. Windows installs per user into `%LOCALAPPDATA%\Programs\Ashapp`, without an administrator prompt; macOS installs `/Applications/Ashapp.app` and may request administrator approval. Saved profiles, templates, trusted host keys and OS-vault entries are outside the application bundle and are preserved. Replacing an ad-hoc macOS build can prompt for Keychain access again. A previous portable Windows copy or a Mac copy outside Applications remains a separate, older copy; use the installed app after updating.
 
 **Bootstrap and validation:** downloadable v0.0.3 has no updater or system installers. Install v0.0.4 or later manually once. From an installed v0.0.4 or v0.0.5, use **Check for updates** to download v0.0.7, finish Windows Setup/macOS Installer and reopen the installed app. Native CI compiles/packages the app and runs local tests; actual installer execution, macOS Installer sandbox handoff and OS-vault retention still need an end-to-end check. No claim of a completed end-to-end update is made.
 
-Updates currently trust the public GitHub repository and HTTPS. Checksums detect altered bytes; they are not independent publisher signatures. Windows packages remain unsigned and macOS packages are not Developer ID-signed/notarized. OS security confirmation may be required. This version does not silently install, bypass OS security prompts or implement cryptographically signed/offline update feeds. See [update behavior and release requirements](docs/UPDATES.md).
+Updates currently trust the public GitHub repository and HTTPS. Checksums detect altered bytes; they are not independent publisher signatures. Windows packages remain unsigned and macOS packages are not Developer ID-signed/notarized. OS security confirmation may be required. Published v0.0.7 does not silently install. The v0.0.8 background flow also preserves system security prompts; neither implements independently signed/offline update feeds. See [update behavior and release requirements](docs/UPDATES.md).
 
 ## Configure a VPS
 
@@ -165,7 +169,7 @@ flutter run -d macos
 
 For release builds use `flutter build windows --release` or `flutter build macos --release`. Copy the complete Windows release directory or macOS `.app`. CI creates separate Intel and Apple Silicon archives and checks their architectures.
 
-Packaging the new Windows Setup executable also requires [Inno Setup 6](https://jrsoftware.org/isinfo.php), available on the Windows CI image. Set `INNO_ISCC` to `ISCC.exe` if it is outside the usual Program Files directory. macOS installer packaging uses Xcode's `pkgbuild`. These tools are needed only to build release installers, not to run Ashapp. All three installers must pass the same source/checksum gate before publication.
+Packaging the new Windows Setup executable also requires [Inno Setup 6](https://jrsoftware.org/isinfo.php), available on the Windows CI image. Set `INNO_ISCC` to `ISCC.exe` if it is outside the usual Program Files directory. macOS packaging uses `xcrun swiftc`, `codesign`, `pkgbuild` and `hdiutil`. These tools are needed only to build release installers, not to run Ashapp. All three installers must pass the same source/checksum gate before publication.
 
 The Apple Silicon archive is cross-compiled with Xcode on an Intel Mac runner because hosted ARM runners can be unavailable. CI checks the executable and every embedded Mach-O dependency for arm64 support; tests execute on the Intel host. Physical Apple Silicon runtime validation is still pending. Each build manifest records the build/test host architecture.
 

@@ -10,10 +10,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from build_installers import build_installer
+from build_installers import build_installer, build_macos_helper, build_macos_maintenance_disk
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.0.7'
+VERSION = '0.0.8'
 FLUTTER_VERSION = '3.47.9'
 FLUTTER_REVISION = 'c197ca5199'
 
@@ -50,6 +50,7 @@ def package(target, output):
             result.write(ROOT / 'vendor/LICENSE.Varckin', 'LICENSE.Varckin')
     else:
         bundle = ROOT / 'flutter/build/macos/Build/Products/Release/Ashapp.app'
+        build_macos_helper(ROOT, target, VERSION, bundle / 'Contents/Helpers/Ashapp Maintenance.app')
         binary = bundle / 'Contents/MacOS/Ashapp'
         required = 'arm64' if target.endswith('arm64') else 'x86_64'
         actual = subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split()
@@ -68,7 +69,9 @@ def package(target, output):
         resources = bundle / 'Contents/Resources'
         shutil.copy2(ROOT / 'LICENSE', resources / 'LICENSE')
         shutil.copy2(ROOT / 'vendor/LICENSE.Varckin', resources / 'LICENSE.Varckin')
-        subprocess.run(['codesign', '--force', '--deep', '--sign', '-',
+        # Nested code is already signed (including the unsandboxed helper).
+        # Do not recursively apply the host's sandbox entitlement to helpers.
+        subprocess.run(['codesign', '--force', '--sign', '-',
                         '--identifier', 'io.github.andreybrsv.ashapp',
                         '--entitlements', str(ROOT / 'flutter/macos/Runner/Release.entitlements'),
                         str(bundle)], check=True)
@@ -82,6 +85,8 @@ def package(target, output):
             subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent',
                             str(payload), str(archive)], check=True)
     installer = build_installer(ROOT, target, VERSION, output)
+    maintenance = (build_macos_maintenance_disk(ROOT, target, VERSION, output, installer)
+                   if target.startswith('macos-') else None)
     manifest = {'version': VERSION, 'source_commit': revision, 'target': target,
                 'build_host_arch': platform.machine(), 'test_host_arch': platform.machine(),
                 'flutter': sdk['frameworkVersion'], 'flutter_revision': sdk['frameworkRevision'],
@@ -92,6 +97,9 @@ def package(target, output):
                 'installer_size': installer.stat().st_size,
                 'run_url': (f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
                             f"{os.environ['GITHUB_RUN_ID']}" if 'GITHUB_RUN_ID' in os.environ else None)}
+    if maintenance:
+        manifest.update(maintenance=maintenance.name, maintenance_sha256=sha256(maintenance),
+                        maintenance_size=maintenance.stat().st_size)
     (output / f'{stem}.build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     print(f'Packaged {archive.name}')
 

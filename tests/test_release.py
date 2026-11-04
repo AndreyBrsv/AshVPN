@@ -13,6 +13,17 @@ from package_release import VERSION, sha256
 
 
 class ReleaseIdentityTests(unittest.TestCase):
+    def test_tampered_maintenance_disk_prevents_publication(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            self.create_assets(directory, 'same-commit-placeholder')
+            (directory / f'Ashapp-v{VERSION}-macos-arm64-maintenance.dmg').write_bytes(b'changed')
+            with patch.object(prepare_release.subprocess, 'check_output', return_value='same-commit-placeholder'), \
+                    patch.object(prepare_release.subprocess, 'run') as archive:
+                with self.assertRaisesRegex(ValueError, 'Maintenance'):
+                    prepare_release.prepare(directory)
+                archive.assert_not_called()
+
     def create_assets(self, directory, commit):
         for target in ('windows-x64', 'macos-x64', 'macos-arm64'):
             stem = f'Ashapp-v{VERSION}-{target}'
@@ -21,11 +32,16 @@ class ReleaseIdentityTests(unittest.TestCase):
             suffix = '.exe' if target == 'windows-x64' else '.pkg'
             installer = directory / f'{stem}-setup{suffix}'
             installer.write_bytes(b'synthetic-non-executable-installer')
+            maintenance = {}
+            if target.startswith('macos-'):
+                disk = directory / f'{stem}-maintenance.dmg'
+                disk.write_bytes(b'synthetic-maintenance-disk')
+                maintenance = dict(maintenance=disk.name, maintenance_sha256=sha256(disk), maintenance_size=disk.stat().st_size)
             (directory / f'{stem}.build.json').write_text(json.dumps({
                 'version': VERSION, 'target': target, 'source_commit': commit,
                 'archive': archive.name, 'sha256': sha256(archive),
                 'installer': installer.name, 'installer_sha256': sha256(installer),
-                'installer_size': installer.stat().st_size}))
+                'installer_size': installer.stat().st_size, **maintenance}))
 
     def test_tampered_installer_is_rejected_before_publication(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -50,6 +66,7 @@ class ReleaseIdentityTests(unittest.TestCase):
             sums = (directory / 'SHA256SUMS').read_text()
             self.assertEqual(sums.count('-setup.exe'), 1)
             self.assertEqual(sums.count('-setup.pkg'), 2)
+            self.assertEqual(sums.count('-maintenance.dmg'), 2)
             self.assertIn(f'Ashapp-v{VERSION}-source.zip', sums)
 
     def test_mixed_source_commits_are_rejected_before_creating_source_archive(self):

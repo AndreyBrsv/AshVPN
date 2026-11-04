@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 
 import 'appearance.dart';
@@ -28,11 +29,35 @@ import 'private_key_field.dart';
 import 'workspace_shell.dart';
 import 'server_workspace.dart';
 import 'vless_connection.dart';
+import 'local_data_cleanup.dart';
 
 export 'workspace_controller.dart' show SshConnector;
 
-Future<void> main() async {
+Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
+  var maintenance = arguments.contains('--erase-local-data');
+  if (Platform.isMacOS) {
+    try {
+      maintenance =
+          await const MethodChannel('ashapp/app-update')
+              .invokeMethod<bool>('maintenanceRequested') ??
+          false;
+    } catch (_) {
+      exit(1);
+    }
+  }
+  if (maintenance) {
+    try {
+      await eraseLocalData(
+        directory: appDataDirectory(),
+        eraseSecrets: eraseAshappSecrets,
+      );
+      exit(0);
+    } catch (_) {
+      // No paths, account names or vault payloads in uninstall output.
+      exit(1);
+    }
+  }
   final appearance = AppearanceController(
     repository: JsonAppearanceRepository(
       JsonFileStore(

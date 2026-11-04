@@ -25,6 +25,13 @@ def prepare(output):
                 or manifest.get('installer_size') != installer.stat().st_size):
             raise ValueError('Installer identity or checksum mismatch.')
         artifacts.extend([output / f'{stem}.zip', output / f'{stem}.build.json', installer])
+        if target.startswith('macos-'):
+            maintenance = output / f'{stem}-maintenance.dmg'
+            if (manifest.get('maintenance') != maintenance.name or not maintenance.is_file()
+                    or manifest.get('maintenance_sha256') != sha256(maintenance)
+                    or manifest.get('maintenance_size') != maintenance.stat().st_size):
+                raise ValueError('Maintenance identity or checksum mismatch.')
+            artifacts.append(maintenance)
     source = output / f'Ashapp-v{VERSION}-source.zip'
     subprocess.run(['git', 'archive', '--format=zip', f'--prefix=Ashapp-{VERSION}/',
                     f'--output={source}', revision], cwd=ROOT, check=True)

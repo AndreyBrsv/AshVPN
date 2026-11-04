@@ -24,6 +24,12 @@ class MainFlutterWindow: NSWindow {
                                       binaryMessenger: flutterViewController.engine.binaryMessenger)
     updates.setMethodCallHandler { call, result in
       switch call.method {
+      case "maintenanceRequested":
+        let requested = CommandLine.arguments.contains("--erase-local-data")
+        if requested && NSRunningApplication.runningApplications(withBundleIdentifier: "io.github.andreybrsv.ashapp")
+          .contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+          result(FlutterError(code: "maintenance_busy", message: "Close Ashapp before uninstalling.", details: nil))
+        } else { result(requested) }
       case "info":
         #if arch(arm64)
         let target = "macos-arm64"
@@ -35,23 +41,17 @@ class MainFlutterWindow: NSWindow {
       case "openInstaller":
         guard let args = call.arguments as? [String: Any], let path = args["path"] as? String,
               let installer = MainFlutterWindow.updateInstaller(path: path),
-              let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.installer") else {
+              let hash = args["sha256"] as? String,
+              hash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              Bundle.main.bundleURL.path == "/Applications/Ashapp.app" else {
           result(FlutterError(code: "update_failed", message: "Invalid installer.", details: nil))
           return
         }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
         do { try MainFlutterWindow.quarantineInstaller(installer) } catch {
           result(FlutterError(code: "update_failed", message: "Could not apply macOS download security policy.", details: nil))
           return
         }
-        NSWorkspace.shared.open([installer], withApplicationAt: application, configuration: configuration) { _, error in
-          DispatchQueue.main.async {
-            if error != nil {
-              result(FlutterError(code: "update_failed", message: "Could not open the system installer.", details: nil))
-            } else { result(nil) }
-          }
-        }
+        MainFlutterWindow.startBackgroundUpdate(installer, hash: hash, result: result)
       case "quit":
         result(nil)
         DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
@@ -76,6 +76,51 @@ class MainFlutterWindow: NSWindow {
     }
 
     super.awakeFromNib()
+  }
+
+  static func startBackgroundUpdate(_ installer: URL, hash: String, result: @escaping FlutterResult) {
+    let manager = FileManager.default
+    let folder = installer.deletingLastPathComponent()
+    let helper = folder.appendingPathComponent("Ashapp Maintenance.app", isDirectory: true)
+    let ready = folder.appendingPathComponent("maintenance-ready")
+    do {
+      let source = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Ashapp Maintenance.app")
+      guard manager.fileExists(atPath: source.path),
+            !manager.fileExists(atPath: helper.path), !manager.fileExists(atPath: ready.path) else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+      }
+      // The helper must outlive replacement of the original .app bundle.
+      try manager.copyItem(at: source, to: helper)
+    } catch {
+      result(FlutterError(code: "update_failed", message: "Update helper is unavailable. Re-download the app or use the installer.", details: nil))
+      return
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.arguments = ["--update", installer.path, hash, String(ProcessInfo.processInfo.processIdentifier)]
+    configuration.activates = false
+    configuration.createsNewApplicationInstance = true
+    NSWorkspace.shared.openApplication(at: helper, configuration: configuration) { application, error in
+      DispatchQueue.main.async {
+        guard error == nil, let application = application else {
+          try? manager.removeItem(at: helper)
+          result(FlutterError(code: "update_failed", message: "Could not start the update helper.", details: nil))
+          return
+        }
+        let deadline = Date().addingTimeInterval(30)
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+          if (try? String(contentsOf: ready, encoding: .utf8)) == "ready" {
+            timer.invalidate()
+            result(nil)
+          } else if application.isTerminated || Date() >= deadline {
+            timer.invalidate()
+            // Before readiness the parent is still alive, so installation has
+            // not started. Cancel only our own helper, never a server task.
+            application.forceTerminate()
+            result(FlutterError(code: "update_failed", message: "The update helper was not ready. Close any maintenance window and retry.", details: nil))
+          }
+        }
+      }
+    }
   }
 
   static func updateInstaller(path: String) -> URL? {

@@ -17,11 +17,11 @@ class AppUpdateDialog extends StatelessWidget {
   Future<void> _install(BuildContext context) async {
     final approved = await confirmAction(
       context,
-      'Install Ashapp ${controller.release!.version}?',
-      'Ashapp will close and disconnect all SSH sessions. Complete the system installer, then reopen the app. '
+      'Update to Ashapp ${controller.release!.version}?',
+      'Ashapp will close and disconnect all SSH sessions, update in the background and reopen. '
           'Your saved servers, templates and protected passwords stay on this computer. '
-          'Windows installs into your user Programs folder; macOS installs into Applications.',
-      action: 'Open installer',
+          'A system security or administrator prompt may still require your approval.',
+      action: 'Restart and update',
     );
     if (approved) await controller.install(canInstall: canInstall);
   }
@@ -153,7 +153,7 @@ class AppUpdateDialog extends StatelessWidget {
             FilledButton.icon(
               onPressed: canInstall() ? () => _install(context) : null,
               icon: const Icon(Icons.system_update_outlined),
-              label: const Text('Install update…'),
+              label: const Text('Restart and update'),
             ),
         ],
       );

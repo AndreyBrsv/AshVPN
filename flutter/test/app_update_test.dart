@@ -27,6 +27,7 @@ class FixtureTransport implements UpdateTransport {
 
 class FixtureRuntime implements UpdateRuntime {
   int opened = 0, quits = 0;
+  String? receivedDigest;
   bool failOpen = false, failQuit = false;
   @override
   Future<UpdatePlatform> platform() async => UpdatePlatform(
@@ -34,7 +35,11 @@ class FixtureRuntime implements UpdateRuntime {
     target: 'windows-x64',
   );
   @override
-  Future<void> openInstaller(File file) async {
+  Future<void> openInstaller(
+    File file, {
+    required String expectedSha256,
+  }) async {
+    receivedDigest = expectedSha256;
     if (failOpen) throw StateError('synthetic launch failure');
     opened++;
   }
@@ -393,6 +398,7 @@ void main() {
     expect(await vm.install(canInstall: () => true), isTrue);
     expect(runtime.opened, 1);
     expect(runtime.quits, 1);
+    expect(runtime.receivedDigest, vm.release!.installer.sha256);
     expect(vm.phase, UpdatePhase.handedOff);
   });
 

@@ -9,10 +9,46 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tool'))
-from build_installers import build_installer
+from build_installers import build_installer, build_macos_helper, build_macos_maintenance_disk
 
 
 class InstallerTests(unittest.TestCase):
+    def test_macos_helper_compiles_requested_arch_without_sandbox_inheritance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            app = root / 'Helpers/Ashapp Maintenance.app'
+            with patch('build_installers.subprocess.run') as run:
+                build_macos_helper(root, 'macos-arm64', '0.0.8', app)
+            command = run.call_args_list[0].args[0]
+            self.assertIn('arm64-apple-macos12.0', command)
+            self.assertEqual(command[:2], ['xcrun', 'swiftc'])
+            self.assertNotIn('--entitlements', run.call_args_list[1].args[0])
+            info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+            self.assertEqual(info['CFBundleIdentifier'], 'io.github.andreybrsv.ashapp.maintenance')
+
+    def test_macos_maintenance_disk_binds_embedded_package_to_digest(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'LICENSE').write_text('fixture')
+            installer = root / 'fixture.pkg'
+            installer.write_bytes(b'synthetic-installer')
+            def fake_helper(root, target, version, app):
+                (app / 'Contents/Resources').mkdir(parents=True)
+                (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({}))
+            def command(args, **kwargs):
+                if args[0] == 'codesign' and '--force' in args:
+                    app = Path(args[-1])
+                    info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+                    self.assertEqual(info['AshappPackageSHA256'], hashlib.sha256(installer.read_bytes()).hexdigest())
+                    self.assertEqual((app / 'Contents/Resources/Installation.pkg').read_bytes(), installer.read_bytes())
+                if args[0] == 'hdiutil':
+                    Path(args[-1]).write_bytes(b'synthetic-disk')
+            with patch('build_installers.build_macos_helper', side_effect=fake_helper), \
+                    patch('build_installers.subprocess.run', side_effect=command):
+                disk = build_macos_maintenance_disk(root, 'macos-x64', '0.0.8', root, installer)
+            self.assertTrue(disk.is_file())
+
     def test_windows_packages_whole_bundle_without_force_closing_or_deleting_profiles(self):
         source = (ROOT / 'tool/windows_setup.iss').read_text()
         self.assertIn('PrivilegesRequired=lowest', source)

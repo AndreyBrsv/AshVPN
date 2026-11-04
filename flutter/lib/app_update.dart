@@ -467,7 +467,7 @@ class UpdateRepository {
 
 abstract class UpdateRuntime {
   Future<UpdatePlatform> platform();
-  Future<void> openInstaller(File file);
+  Future<void> openInstaller(File file, {required String expectedSha256});
   Future<void> quit();
 }
 
@@ -478,8 +478,16 @@ class NativeUpdateRuntime implements UpdateRuntime {
     await channel.invokeMapMethod<Object?, Object?>('info') ?? {},
   );
   @override
-  Future<void> openInstaller(File file) =>
-      channel.invokeMethod<void>('openInstaller', {'path': file.absolute.path});
+  Future<void> openInstaller(
+    File file, {
+    required String expectedSha256,
+  }) async {
+    await channel.invokeMethod<void>('openInstaller', {
+      'path': file.absolute.path,
+      'sha256': expectedSha256,
+    });
+  }
+
   @override
   Future<void> quit() => channel.invokeMethod<void>('quit');
 }
@@ -697,10 +705,13 @@ class AppUpdateController extends ChangeNotifier {
           'A server task started. Finish it before installing.',
         );
       }
-      await runtime.openInstaller(prepared!.file);
+      await runtime.openInstaller(
+        prepared!.file,
+        expectedSha256: prepared!.release.installer.sha256,
+      );
       opened = true;
       phase = UpdatePhase.handedOff;
-      notice = 'Complete the system installer, then reopen Ashapp.';
+      notice = 'Ashapp will restart after the update. Approve any system security prompt.';
       _changed();
       await runtime.quit();
       return true;
@@ -710,8 +721,8 @@ class AppUpdateController extends ChangeNotifier {
       error = _message(
         e,
         opened
-            ? 'The installer is open. Close Ashapp, then complete installation.'
-            : 'Could not open the system installer. Your current app is unchanged.',
+            ? 'The update is ready to run. Close Ashapp to continue.'
+            : 'Could not start the update. Your current app is unchanged.',
       );
       _changed();
       return false;

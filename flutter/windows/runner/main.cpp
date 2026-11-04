@@ -9,6 +9,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
   // Installer checks the same mutex instead of terminating an active SSH task.
   const HANDLE app_mutex = CreateMutexW(nullptr, FALSE, L"Ashapp.Desktop.Running");
+  const bool already_running = GetLastError() == ERROR_ALREADY_EXISTS;
   // Attach to console when present (e.g., 'flutter run') or create a
   // new console when running with a debugger.
   if (!::AttachConsole(ATTACH_PARENT_PROCESS) && ::IsDebuggerPresent()) {
@@ -23,6 +24,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
+  for (const auto& argument : command_line_arguments) {
+    if (argument == "--erase-local-data" && already_running) {
+      if (app_mutex) CloseHandle(app_mutex);
+      ::CoUninitialize();
+      return EXIT_FAILURE;
+    }
+  }
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
