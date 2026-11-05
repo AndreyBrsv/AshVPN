@@ -113,6 +113,14 @@ class VLESSTests(unittest.TestCase):
         code = 0 if self.active or args[:2] != ['systemctl', 'is-active'] else 3
         return subprocess.CompletedProcess(args, code, '', '')
 
+    def test_stale_client_edit_does_not_overwrite_external_change(self):
+        changed = copy.deepcopy(self.original)
+        changed['clients'][1]['name'] = 'External edit'
+        with patch.object(self.manager, 'load', side_effect=[copy.deepcopy(self.original), changed]):
+            with self.assertRaisesRegex(RuntimeError, 'changed concurrently'):
+                self.manager.action('add-client', ['New phone', vless.SOURCE])
+        self.assertFalse(self.writes)
+
     def test_export_is_allowlisted_and_never_contains_server_secrets(self):
         fields = ['Ignored display name', vless.SOURCE, self.original['clients'][0]['uuid']]
         result = self.manager.action('get-client', fields)
@@ -321,6 +329,10 @@ class VLESSTests(unittest.TestCase):
             return self.manager.install('203.0.113.10', 24443, 'www.microsoft.com', 'chrome')
 
     def install_command(self, args, data=None, check=True):
+        if (args[:2] == ['systemctl', 'is-active'] and args[-1] in ('firewalld', 'nftables')) or args == ['ufw', 'status']:
+            return subprocess.CompletedProcess(args, 3, '', '')
+        if args[:2] == ['iptables', '-S']:
+            return subprocess.CompletedProcess(args, 0, '-P INPUT ACCEPT\n', '')
         if args[:3] == [str(self.binary), 'generate', 'reality-keypair']:
             return subprocess.CompletedProcess(args, 0, f'PrivateKey: {key(1)}\nPublicKey: {key(2)}\n', '')
         if args[:2] == ['getent', 'passwd']:

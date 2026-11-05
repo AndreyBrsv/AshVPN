@@ -128,8 +128,6 @@ create_user() {
     else
         adduser --disabled-password --gecos '' --shell /bin/bash "$user" >/dev/null
     fi
-    printf '%s:%s\n' "$user" "$password" | chpasswd
-    unset password
     usermod -aG sudo -s /bin/bash "$user"
     temporary="$(mktemp /etc/sudoers.d/.ashapp.XXXXXXXX)"
     printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$user" > "$temporary"
@@ -138,6 +136,8 @@ create_user() {
     install -o root -g root -m 0440 "$temporary" "/etc/sudoers.d/90-ashapp-$user"
     rm -f -- "$temporary"
     visudo -cf /etc/sudoers
+    printf '%s:%s\n' "$user" "$password" | chpasswd
+    unset password
     ok 'Passwordless sudo granted to the administrator.'
 }
 
@@ -254,17 +254,21 @@ icmp() {
     header 'Block ping replies'
     # A netfilter-persistent plugin avoids snapshotting Docker/AWG dynamic chains.
     install -d -m 0755 /usr/share/netfilter-persistent/plugins.d
+    if [[ -e /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp ]] && ! grep -qF 'ashapp-owned-icmp-v1' /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp; then
+        fatal 'An existing ping rule or plugin needs manual review; it was not changed.'
+    fi
     cat > /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp <<'PLUGIN'
 #!/bin/sh
+# ashapp-owned-icmp-v1
 set -e
 case "$1" in
     start|restart|reload)
-        iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null ||
-            iptables -I INPUT -p icmp --icmp-type echo-request -j DROP
+        iptables -C INPUT -p icmp --icmp-type echo-request -m comment --comment ashapp-owned-icmp-v1 -j DROP 2>/dev/null ||
+            iptables -I INPUT -p icmp --icmp-type echo-request -m comment --comment ashapp-owned-icmp-v1 -j DROP
         ;;
     flush)
-        while iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null; do
-            iptables -D INPUT -p icmp --icmp-type echo-request -j DROP
+        while iptables -C INPUT -p icmp --icmp-type echo-request -m comment --comment ashapp-owned-icmp-v1 -j DROP 2>/dev/null; do
+            iptables -D INPUT -p icmp --icmp-type echo-request -m comment --comment ashapp-owned-icmp-v1 -j DROP
         done
         ;;
     save|stop) : ;;
@@ -420,12 +424,10 @@ case "$ACTION" in
         ok 'Public key installed.' ;;
     icmp-unblock)
         if [[ -x /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp ]]; then
+            grep -qF 'ashapp-owned-icmp-v1' /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp || fatal 'The existing ping plugin needs manual review; no rules were removed.'
             /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp flush
             rm -f /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp
         fi
-        while iptables -C INPUT -p icmp --icmp-type echo-request -j DROP 2>/dev/null; do
-            iptables -D INPUT -p icmp --icmp-type echo-request -j DROP
-        done
         ok 'Ashapp ping block removed.' ;;
     reboot)
         header 'Reboot'

@@ -1366,6 +1366,7 @@ class _HomePageState extends State<HomePage> {
               onPressed: checkForUpdates,
               icon: Badge(
                 isLabelVisible: updates.release != null,
+                label: const Text('!'),
                 child: const Icon(Icons.system_update_outlined),
               ),
             ),

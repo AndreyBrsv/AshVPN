@@ -2,11 +2,11 @@
 
 Introduced in **v0.0.4**. Published v0.0.3 does not contain it. The first updater-enabled release must be installed manually; an old binary cannot acquire updater code by checking GitHub.
 
-The background-maintenance behavior documented below is **v0.0.8 source**. Published v0.0.7 and earlier still open the interactive system installer. Publication requires all native targets and verified assets; source changes alone do not establish publication.
+Background maintenance was introduced in v0.0.8. Published v0.0.7 and earlier open the interactive system installer. Starting with v0.0.11, Windows and each macOS target can publish independently after their own checks; source changes alone do not establish publication.
 
 ## User flow
 
-1. Open **App updates** in the toolbar. Background checks run at most daily while the app is open, plus a due check at launch. Disable **Check automatically** to opt out. **Check now** remains available.
+1. Open **App updates** in the toolbar. With **Check automatically** enabled, each launch checks GitHub even after a recent check, and an open app checks daily. Disable it to opt out. **Check now** remains available. An available update keeps an accessible `!` badge on the toolbar button until it is installed or no longer offered.
 2. A stable newer release shows its version and plain-text release notes. A badge remains in the toolbar. Checking never installs or downloads executable packages automatically.
 3. Choose **Download update**. Progress and cancellation are available. Downloading can continue while managing servers or after dismissing the dialog.
 4. Choose **Restart and update** and confirm. Finish tasks on every server first. New operations on existing and newly added server sessions are gated during installation handoff.
@@ -26,13 +26,13 @@ Server profiles, template metadata, trusted SSH keys and OS-vault entries stay i
 
 ## Verification and trust
 
-The app requests the fixed repository's public `releases/latest` endpoint, without a GitHub token. It accepts numeric stable versions and never offers a downgrade. It requires all three platform installers and build manifests, so partially uploaded releases are refused.
+The app requests the fixed repository's public `releases/latest` endpoint, without a GitHub token. It accepts numeric stable versions and never offers a downgrade. Starting with v0.0.11, it requires a complete verified set for the current platform. A release whose Windows target is ready can update Windows while macOS builds continue. Earlier updater versions can still require the complete three-platform set and combined checksums.
 
 For the selected platform it verifies:
 
 - Exact expected asset name and HTTPS download URL; uploaded state, positive bounded length and GitHub SHA-256 digest.
-- GitHub digests and lengths for `SHA256SUMS` and the platform `.build.json`.
-- Installer and build-manifest entries in `SHA256SUMS`, without duplicate or path-bearing names.
+- GitHub digests and lengths for the platform-specific `Ashapp-v<version>-<target>-SHA256SUMS` (or combined `SHA256SUMS`) and the platform `.build.json`.
+- Installer and build-manifest entries in the selected checksum file, without duplicate or path-bearing names.
 - Matching version, platform, source commit format, installer name, size and hash in the build manifest.
 - Exact installer length and streaming SHA-256, then a second hash immediately before native launch.
 
@@ -50,7 +50,7 @@ Every new version needs a new source commit, a higher numeric app version/build 
 
 `tool/package_release.py` builds the complete native ZIP and system installer together, then records their hashes, lengths and source identity in the platform `.build.json`. macOS also records the maintenance DMG. Windows needs Inno Setup 6 (`INNO_ISCC` can select its path); macOS uses `xcrun swiftc`, `codesign`, `pkgbuild` and `hdiutil`. Maintenance helpers contain no private signing keys. Installers include the application's license notices.
 
-`tool/prepare_release.py` refuses mixed commits, missing platforms, modified archives/installers and unexpected release-output files. Its `SHA256SUMS` covers all ZIPs, installers, manifests and the source ZIP. The publish job waits for all three native jobs and publishes the release only after uploading the complete set. New public builds can attest ZIPs/installers through the pinned GitHub action. Update publication still requires the owner's explicit release instruction and manual `workflow_dispatch` publication; ordinary commits do not publish.
+`tool/prepare_release.py --target` verifies one target's source identity, complete files and checksums. Each native job uploads its verified assets and publishes its platform-specific checksum file last, marking that target ready. The source archive is published first; the combined `SHA256SUMS` is added only after all three targets succeed. Mixed commits, modified files and unexpected output files are refused. Existing published asset bytes cannot be replaced on retry. New public builds can attest ZIPs/installers through the pinned GitHub action. Update publication still requires the owner's explicit release instruction and manual `workflow_dispatch` publication; ordinary commits do not publish.
 
 Expected installer names:
 

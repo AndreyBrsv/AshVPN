@@ -52,43 +52,12 @@ class TestClient extends Fake implements SSHClient {
   bool excessiveOutput = false;
   String? commandError;
   Completer<void>? commandGate;
+  Completer<void>? preparationGate;
+  String? stalledCommand;
+  Completer<SSHSession>? openingGate;
+  final sessions = <TestSession>[];
   @override
   bool get isClosed => false;
-
-  @override
-  Future<SSHRunResult> runWithResult(
-    String command, {
-    bool runInPty = false,
-    bool stdout = true,
-    bool stderr = true,
-    Map<String, String>? environment,
-  }) async {
-    commands.add(command);
-    final bytes = Uint8List.fromList(
-      utf8.encode(
-        command.contains('mktemp') ? '/tmp/ashapp.test${++directories}\n' : '',
-      ),
-    );
-    return SSHRunResult(
-      output: bytes,
-      stdout: bytes,
-      stderr: Uint8List(0),
-      exitCode: command == 'sudo -n true' && denySudo ? 1 : 0,
-      exitSignal: null,
-    );
-  }
-
-  @override
-  Future<Uint8List> run(
-    String command, {
-    bool runInPty = false,
-    bool stdout = true,
-    bool stderr = true,
-    Map<String, String>? environment,
-  }) async {
-    commands.add(command);
-    return Uint8List(0);
-  }
 
   @override
   Future<SSHSession> execute(
@@ -98,10 +67,32 @@ class TestClient extends Fake implements SSHClient {
     Map<String, String>? environment,
   }) async {
     commands.add(command);
+    if (openingGate != null && command == stalledCommand) {
+      return openingGate!.future;
+    }
+    if (command == 'sudo -n true' || command.contains('mktemp')) {
+      final session = TestSession(
+        code: command == 'sudo -n true' && denySudo ? 1 : 0,
+        gate: command == stalledCommand ? preparationGate : null,
+        text: excessiveOutput
+            ? List.filled(8 * 1024 * 1024 + 1, 'x').join()
+            : command.contains('mktemp')
+            ? '/tmp/ashapp.test${++directories}\n'
+            : '',
+      );
+      sessions.add(session);
+      return session;
+    }
+    if (command.startsWith('rm -f')) return TestSession();
     if (command.contains('cat >')) {
       final fail = failNextUpload;
       failNextUpload = false;
-      return TestSession(code: fail ? 1 : 0);
+      final session = TestSession(
+        code: fail ? 1 : 0,
+        gate: stalledCommand == 'upload' ? preparationGate : null,
+      );
+      sessions.add(session);
+      return session;
     }
     final session = TestSession(
       gate: commandGate,
@@ -120,6 +111,61 @@ class TestClient extends Fake implements SSHClient {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  for (final stage in [
+    'sudo -n true',
+    'umask 077; mktemp -d /tmp/ashapp.XXXXXXXXXX',
+    'upload',
+  ]) {
+    test(
+      'timeout covers preparation at $stage and permits a clean retry',
+      () async {
+        final client = TestClient()
+          ..stalledCommand = stage
+          ..preparationGate = Completer<void>();
+        final backend = RemoteBackend(
+          SshConnection.fromClient(client),
+          'friend',
+          commandTimeout: const Duration(milliseconds: 80),
+        );
+        addTearDown(backend.close);
+        await expectLater(
+          backend.run('status'),
+          throwsA(isA<TimeoutException>()),
+        );
+        expect(client.preparationGate!.isCompleted, isTrue);
+        client.stalledCommand = null;
+        // Let the cancelled preparation unwind before retrying.
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(await backend.run('status'), {'ok': true});
+      },
+    );
+  }
+  test(
+    'late channel opening after a timeout is closed without running an action',
+    () async {
+      final client = TestClient()
+        ..stalledCommand = 'sudo -n true'
+        ..openingGate = Completer<SSHSession>();
+      final backend = RemoteBackend(
+        SshConnection.fromClient(client),
+        'friend',
+        commandTimeout: const Duration(milliseconds: 30),
+      );
+      addTearDown(backend.close);
+      await expectLater(
+        backend.run('status'),
+        throwsA(isA<TimeoutException>()),
+      );
+      final late = TestSession(gate: Completer<void>());
+      client.openingGate!.complete(late);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(late.finished.isCompleted, isTrue);
+      expect(
+        client.commands.where((s) => s.contains('remote.sh status')),
+        isEmpty,
+      );
+    },
+  );
   test('client validation errors remain actionable instead of a generic action failure', () async {
     final client = TestClient()
       ..commandError = 'The private configuration does not match this client.';
@@ -179,7 +225,7 @@ void main() {
         client.commands.where(
           (s) => s.startsWith('umask 077; cat > /tmp/ashapp.test2/'),
         ),
-        hasLength(7),
+        hasLength(8),
       );
     },
   );

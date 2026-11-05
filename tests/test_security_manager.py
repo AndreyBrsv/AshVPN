@@ -75,6 +75,7 @@ class SecurityTests(unittest.TestCase):
             if operation == '-S':
                 code = 0 if chain == 'INPUT' or key in self.chains else 1
                 if chain == 'INPUT': output = '-P INPUT ACCEPT\n'
+                output += ''.join('-A ' + chain + ' ' + ' '.join(rule) + '\n' for rule in self.chains.get(key, []))
             if operation == '-S' and chain == 'f2b-ashapp-sshd':
                 code = 0
                 output = ''.join(f'-A {chain} -s {address} -j REJECT\n' for address in self.banned)
@@ -286,6 +287,16 @@ class SecurityTests(unittest.TestCase):
             security.preview({'firewall': True})
         self.assertEqual(security.RECOVERY.read_text(), 'existing external unit')
 
+    def test_firewall_diagnostics_detect_flushed_or_widened_owned_chains(self):
+        staged = self.stage({'firewall': True}); self.confirm(staged['token'])
+        config = security.read_json(self.files['firewall'])
+        self.assertTrue(security.firewall_status(config, [])['enabled'])
+        original = list(self.chains['iptables', 'ASHAPP-IN'])
+        self.chains['iptables', 'ASHAPP-IN'] = []
+        self.assertFalse(security.firewall_status(config, [])['enabled'])
+        self.chains['iptables', 'ASHAPP-IN'] = [['-j', 'ACCEPT'], *original]
+        self.assertFalse(security.firewall_status(config, [])['enabled'])
+
     def test_docker_startup_hook_restores_rules_after_early_boot_and_diagnostics_detects_gap(self):
         ports = [{'protocol': 'tcp', 'port': 1080}]
         self.chains['iptables', 'DOCKER-USER'] = []
@@ -301,6 +312,10 @@ class SecurityTests(unittest.TestCase):
         security.check_owned(allow_pending=True)
         security.firewall_reconcile()  # same action as ExecStartPost
         self.assertTrue(security.firewall_status(config, ports)['enabled'])
+        saved = list(self.chains['iptables', 'ASHAPP-DKR'])
+        self.chains['iptables', 'ASHAPP-DKR'] = []
+        self.assertFalse(security.firewall_status(config, ports)['enabled'])
+        self.chains['iptables', 'ASHAPP-DKR'] = saved
         self.assertFalse(security.firewall_status(config, ports + [{'protocol': 'tcp', 'port': 1081}])['enabled'])
         staged = self.stage({'firewall': False}); self.confirm(staged['token'])
         self.assertFalse(security.DOCKER_DROPIN.exists())

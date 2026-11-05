@@ -158,13 +158,16 @@ class AppRelease {
     }
     UpdateAsset asset(String name, int limit) =>
         UpdateAsset.fromJson(assets[name] ?? {}, tag, name, limit);
-    // A partially uploaded release must never become an update for one OS only.
-    for (final target in UpdatePlatform.targets) {
-      final suffix = target == 'windows-x64' ? '.exe' : '.pkg';
-      asset('Ashapp-$tag-$target-setup$suffix', _maximumInstallerSize);
-      asset('Ashapp-$tag-$target.build.json', 128 * 1024);
-    }
     final stem = 'Ashapp-$tag-${platform.target}';
+    final platformSums = '$stem-SHA256SUMS';
+    if (!assets.containsKey('$stem-setup${platform.extension}') ||
+        !assets.containsKey('$stem.build.json') ||
+        (!assets.containsKey(platformSums) &&
+            !assets.containsKey('SHA256SUMS'))) {
+      throw const UpdateException(
+        'The update for this platform is not ready yet. Try again later.',
+      );
+    }
     return AppRelease(
       version: version,
       notes: raw['body'] is String
@@ -178,7 +181,10 @@ class AppRelease {
         _maximumInstallerSize,
       ),
       manifest: asset('$stem.build.json', 128 * 1024),
-      checksums: asset('SHA256SUMS', 128 * 1024),
+      checksums: asset(
+        assets.containsKey(platformSums) ? platformSums : 'SHA256SUMS',
+        128 * 1024,
+      ),
     );
   }
 }
@@ -560,12 +566,13 @@ class AppUpdateController extends ChangeNotifier {
     if (_disposed) return;
     _changed();
     _timer = Timer.periodic(const Duration(hours: 1), (_) => _automaticCheck());
-    await _automaticCheck();
+    await _automaticCheck(onStartup: true);
   }
 
-  Future<void> _automaticCheck() async {
+  Future<void> _automaticCheck({bool onStartup = false}) async {
     if (!automatic || _disposed || working || release != null) return;
-    if (lastChecked == null ||
+    if (onStartup ||
+        lastChecked == null ||
         _now().difference(lastChecked!) >= const Duration(hours: 24)) {
       await check();
     }

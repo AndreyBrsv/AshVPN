@@ -1,7 +1,7 @@
 name: ashapp
 description: Ashapp desktop server setup application.
 publish_to: none
-version: 0.0.10+10
+version: 0.0.11+11
 environment:
   sdk: '>=3.13.0 <4.0.0'
 dependencies:
@@ -29,3 +29,4 @@ flutter:
     - assets/awg_setup.py
     - assets/vless_manager.py
     - assets/security_manager.py
+    - assets/firewall_policy.py

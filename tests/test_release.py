@@ -13,6 +13,20 @@ from package_release import VERSION, sha256
 
 
 class ReleaseIdentityTests(unittest.TestCase):
+    def test_one_target_can_be_verified_independently(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            self.create_assets(directory, 'same-commit-placeholder')
+            for item in directory.iterdir():
+                if 'windows-x64' not in item.name:
+                    item.unlink()
+            with patch.object(prepare_release.subprocess, 'check_output', return_value='same-commit-placeholder'):
+                prepare_release.prepare(directory, 'windows-x64')
+            sums = (directory / f'Ashapp-v{VERSION}-windows-x64-SHA256SUMS').read_text()
+            self.assertIn('-setup.exe', sums)
+            self.assertIn('.build.json', sums)
+            self.assertNotIn('macos-', sums)
+
     def test_tampered_maintenance_disk_prevents_publication(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)

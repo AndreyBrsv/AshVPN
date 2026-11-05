@@ -154,7 +154,9 @@ class ClientTests(unittest.TestCase):
             "SERVER_AWG_NIC=awg0\nSERVER_PUB_IP=2001:db8::1\nCLIENT_DNS_1=1.1.1.1\n")
         self.kernel = patch.object(clients, "verified_kernel", return_value=True).start()
         self.addCleanup(patch.stopall)
-        self.sync = patch.object(clients, "sync").start()
+        self.apply_peer = clients.apply_peer
+        self.sync = patch.object(clients, "apply_peer").start()
+        self.runtime = patch.object(clients, 'runtime_peers', return_value={}).start()
         self.run = patch.object(clients, "run", side_effect=self.fake_run).start()
 
     def fake_run(self, args, data=None, check=True):
@@ -171,6 +173,28 @@ class ClientTests(unittest.TestCase):
         self.assertIn("Address = 10.0.0.4/32", exported)
         self.assertIn("PublicKey = unmarked-test-placeholder", self.config.read_text())
 
+    def test_runtime_only_peer_routes_are_reserved_and_only_new_peer_is_applied(self):
+        self.runtime.return_value = {'external': {'PublicKey': 'external', 'AllowedIPs': '10.0.0.4/32'}}
+        clients.add_client('bob')
+        self.assertIn('Address = 10.0.0.5/32', (self.exports / 'awg0-client-bob.conf').read_text())
+        self.assertEqual(self.sync.call_args.args[1], 'test-key-placeholder')
+        self.assertNotIn('external', self.sync.call_args.args[2].values())
+
+    def test_peer_application_merges_selected_peer_and_preserves_live_foreign_peer(self):
+        selected = dict(PublicKey='selected', AllowedIPs='10.0.0.4/32')
+        peers = {'external': dict(PublicKey='external', AllowedIPs='10.0.0.5/32')}
+        def run(args, data=None, check=True):
+            if args[:2] == ['awg', 'addconf']:
+                peers['selected'] = clients.assignments(data)
+            elif args[:2] == ['awg', 'set']:
+                peers.pop(args[4], None)
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(clients, 'run', side_effect=run), patch.object(clients, 'runtime_peers', side_effect=lambda _: peers), \
+                patch.object(clients, 'apply_peer', self.apply_peer):
+            clients.apply_peer('awg0', 'selected', selected)
+            clients.apply_peer('awg0', 'selected', None)
+        self.assertEqual(set(peers), {'external'})
+
     def test_routed_network_does_not_get_reassigned_to_a_client(self):
         original = self.original.replace("10.0.0.3/32", "10.0.0.0/29")
         self.config.write_text(original)
@@ -180,7 +204,7 @@ class ClientTests(unittest.TestCase):
         self.assertFalse(self.exports.exists())
 
     def test_failed_sync_restores_config_and_removes_client_export(self):
-        self.sync.side_effect = RuntimeError("sync failed")
+        self.sync.side_effect = [RuntimeError("sync failed"), None]
         with self.assertRaises(RuntimeError):
             clients.add_client("bob")
         self.assertEqual(self.config.read_text(), self.original)
@@ -195,7 +219,7 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("PublicKey = alice-test-placeholder", text)
 
     def test_failed_revoke_restores_config(self):
-        self.sync.side_effect = RuntimeError("sync failed")
+        self.sync.side_effect = [RuntimeError("sync failed"), None]
         with self.assertRaises(RuntimeError):
             clients.revoke_client("alice")
         self.assertEqual(self.config.read_text(), self.original)
@@ -214,6 +238,39 @@ class ClientTests(unittest.TestCase):
         self.assertIn('PublicKey = unmarked-test-placeholder', text)
         self.sync.assert_not_called()
 
+    def test_rename_rejects_edit_during_export_creation_without_losing_peer(self):
+        self.exports.mkdir()
+        previous = self.exports / 'awg0-client-alice.conf'
+        previous.write_text('private-export-fixture')
+        concurrent = self.original + '\n[Peer]\nPublicKey = external-fixture\nAllowedIPs = 10.0.0.6/32\n'
+        write = clients.atomic_write
+        def change_during_export(path, text, mode=0o600):
+            write(path, text, mode)
+            if path.name == 'awg0-client-phone.conf':
+                self.config.write_text(concurrent)
+        with patch.object(clients, 'atomic_write', side_effect=change_during_export), self.assertRaisesRegex(RuntimeError, 'changed concurrently'):
+            clients.rename_client('alice', 'phone')
+        self.assertEqual(self.config.read_text(), concurrent)
+        self.assertTrue(previous.exists())
+        self.assertFalse((self.exports / 'awg0-client-phone.conf').exists())
+
+    def test_rename_recovery_preserves_concurrent_edit_and_both_exports(self):
+        self.exports.mkdir()
+        previous = self.exports / 'awg0-client-alice.conf'
+        previous.write_text('private-export-fixture')
+        unlink = Path.unlink
+        def fail_cleanup(path, *args, **kwargs):
+            if path == previous:
+                self.config.write_text(self.config.read_text() + '\n# concurrent external edit\n')
+                raise PermissionError('fixture-denied')
+            return unlink(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', fail_cleanup), self.assertRaisesRegex(RuntimeError, 'Concurrent edits'):
+            clients.rename_client('alice', 'phone')
+        self.assertIn('# concurrent external edit', self.config.read_text())
+        self.assertIn('### Client phone', self.config.read_text())
+        self.assertEqual(previous.read_text(), 'private-export-fixture')
+        self.assertEqual((self.exports / 'awg0-client-phone.conf').read_text(), 'private-export-fixture')
+
     def test_importing_host_config_saves_existing_key_without_vpn_changes(self):
         def key(number):
             return base64.b64encode(bytes([number]) * 32).decode()
@@ -230,6 +287,27 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(clients.get_client('alice')['config'], content)
         self.assertEqual(self.config.read_text(), original)
         self.sync.assert_not_called()
+
+    def test_revocation_reports_export_cleanup_failure_separately(self):
+        from unittest.mock import Mock
+        export = Mock()
+        export.unlink.side_effect = PermissionError('denied')
+        with patch.object(clients, 'client_path', return_value=export):
+            result = clients.revoke_client('alice')
+        self.assertTrue(result['revoked'])
+        self.assertIn('could not be erased', result['warning'])
+
+    def test_host_import_rejects_wrong_endpoint_port(self):
+        def key(number):
+            return base64.b64encode(bytes([number]) * 32).decode()
+        self.config.write_text(self.original.replace('server-test-placeholder', key(1)).replace('alice-test-placeholder', key(2)))
+        content = ('[Interface]\nPrivateKey = ' + key(4) + '\nAddress = 10.0.0.2/32\n'
+                   '[Peer]\nPublicKey = ' + key(5) + '\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:9999\n')
+        def derive(args, data=None, check=True):
+            return subprocess.CompletedProcess(args, 0, (key(2) if data.strip() == key(4) else key(5)) + '\n', '')
+        with patch.object(clients, 'run', side_effect=derive):
+            with self.assertRaisesRegex(RuntimeError, 'endpoint port'):
+                clients.import_client_configuration('alice', key(2), content)
 
 
 if __name__ == "__main__":

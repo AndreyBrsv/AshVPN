@@ -163,8 +163,9 @@ def configure(host, port, dns, nic, private, public):
              f'FORWARD -i {nic} -o awg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT',
              'FORWARD -i awg0 -j ACCEPT']
     for rule in rules:
-        config += f'PostUp = iptables -I {rule}\nPostDown = iptables -D {rule}\n'
-    nat = f'POSTROUTING -s 10.66.66.0/24 -o {nic} -j MASQUERADE'
+        rule = rule.replace(' -j ', ' -m comment --comment ashapp-awg -j ')
+        config += f'PostUp = iptables -A {rule}\nPostDown = iptables -D {rule}\n'
+    nat = f'POSTROUTING -m comment --comment ashapp-awg -s 10.66.66.0/24 -o {nic} -j MASQUERADE'
     config += f'PostUp = iptables -t nat -A {nat}\nPostDown = iptables -t nat -D {nat}\n'
     return params, config
 
@@ -207,6 +208,9 @@ def main(arguments=()):
     spec = importlib.util.spec_from_file_location('clients', base / 'clients.py')
     clients = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(clients)
+    policy_spec = importlib.util.spec_from_file_location('ashapp_firewall_policy', base / 'firewall_policy.py')
+    policy = importlib.util.module_from_spec(policy_spec)
+    policy_spec.loader.exec_module(policy)
     fields = clients.read_fields()
     if len(fields) != 3:
         raise ValueError('Expected an IPv4 address, UDP port and DNS address.')
@@ -221,6 +225,7 @@ def main(arguments=()):
         raise ValueError('A userspace AmneziaWG process is running.')
     if clients.run(['systemctl', 'is-active', '--quiet', 'firewalld'], check=False).returncode == 0:
         raise ValueError('Configured setup requires iptables; firewalld is active.')
+    policy.check_install_policy(clients.run, ('INPUT', 'FORWARD'))
     routes = json.loads(clients.run(['ip', '-j', '-4', 'route', 'show', 'default']).stdout)
     if not routes or not routes[0].get('dev'):
         raise ValueError('No default IPv4 route was found.')

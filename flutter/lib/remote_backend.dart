@@ -21,6 +21,7 @@ class RemoteBackend {
   Future<void>? _closing;
   bool _busy = false;
   bool _closed = false;
+  int _epoch = 0;
   final _sessions = <SSHSession>{};
   final output = StreamController<String>.broadcast();
 
@@ -30,6 +31,29 @@ class RemoteBackend {
 
   void _checkOpen() {
     if (_closed) throw StateError('SSH backend is closed.');
+  }
+
+  void _checkEpoch(int epoch) {
+    _checkOpen();
+    if (epoch != _epoch) {
+      throw StateError('The SSH operation has expired. Retry or reconnect.');
+    }
+  }
+
+  Future<T> _deadline<T>(Future<T> work) {
+    final epoch = _epoch;
+    return work.timeout(
+      commandTimeout,
+      onTimeout: () {
+        if (epoch == _epoch) {
+          _epoch++;
+          for (final session in _sessions.toList()) {
+            session.close();
+          }
+        }
+        throw TimeoutException('The SSH operation timed out.', commandTimeout);
+      },
+    );
   }
 
   void _emit(String text) {
@@ -43,16 +67,32 @@ class RemoteBackend {
     if (_busy) throw StateError('Another server operation is already running.');
     _busy = true;
     try {
-      return await action();
+      return await _deadline(action());
     } finally {
       _busy = false;
     }
   }
 
-  Future<SSHSession> _execute(String command, {SSHPtyConfig? pty}) async {
-    _checkOpen();
-    final session = await connection.client.execute(command, pty: pty);
-    if (_closed) {
+  Future<SSHSession> _execute(
+    String command, {
+    SSHPtyConfig? pty,
+    bool cleanup = false,
+  }) async {
+    if (!cleanup) _checkOpen();
+    final epoch = _epoch;
+    var expired = false;
+    final pending = connection.client.execute(command, pty: pty);
+    pending.then((session) {
+      if (expired) session.close();
+    }, onError: (Object _) {});
+    final session = await pending.timeout(
+      cleanup ? const Duration(seconds: 3) : commandTimeout,
+      onTimeout: () {
+        expired = true;
+        throw TimeoutException('SSH channel opening timed out.');
+      },
+    );
+    if ((_closed && !cleanup) || epoch != _epoch) {
       session.close();
       throw StateError('SSH backend is closed.');
     }
@@ -74,21 +114,43 @@ class RemoteBackend {
   Future<void> prepare() {
     _checkOpen();
     if (_work != null) return Future<void>.value();
-    return _preparing ??= _prepare().whenComplete(() => _preparing = null);
+    return _preparing ??= _deadline(_prepare())
+        .whenComplete(() => _preparing = null);
+  }
+
+  Future<({int? exitCode, String stdout})> _capture(String command) async {
+    final session = await _execute(command);
+    try {
+      final results = await Future.wait([
+        session.done,
+        _bounded(session.stdout.cast<List<int>>())
+            .transform(utf8.decoder)
+            .join(),
+        _bounded(session.stderr.cast<List<int>>()).drain<void>(),
+        session.stdin.close(),
+      ], eagerError: true);
+      return (exitCode: session.exitCode, stdout: results[1] as String);
+    } finally {
+      _sessions.remove(session);
+      session.close();
+    }
   }
 
   Future<void> _prepare() async {
+    final epoch = _epoch;
     if (username != 'root') {
-      final sudo = await connection.client.runWithResult('sudo -n true');
+      final sudo = await _capture('sudo -n true');
+      _checkEpoch(epoch);
       if (sudo.exitCode != 0) {
         throw StateError('This account needs passwordless sudo.');
       }
     }
     _checkOpen();
-    final result = await connection.client.runWithResult(
+    final result = await _capture(
       'umask 077; mktemp -d /tmp/ashapp.XXXXXXXXXX',
     );
-    final created = utf8.decode(result.stdout).trim();
+    _checkEpoch(epoch);
+    final created = result.stdout.trim();
     if (result.exitCode != 0 ||
         !RegExp(r'^/tmp/ashapp\.[A-Za-z0-9]+$').hasMatch(created)) {
       throw StateError('Could not prepare the server directory.');
@@ -102,15 +164,17 @@ class RemoteBackend {
         'awg_setup.py',
         'vless_manager.py',
         'security_manager.py',
+        'firewall_policy.py',
       ]) {
         _checkOpen();
         final asset = await rootBundle.load('assets/$name');
+        _checkEpoch(epoch);
         final session = await _execute('umask 077; cat > $created/$name');
         try {
           await Future.wait([
             session.done,
-            session.stdout.drain<void>(),
-            session.stderr.drain<void>(),
+            _bounded(session.stdout.cast<List<int>>()).drain<void>(),
+            _bounded(session.stderr.cast<List<int>>()).drain<void>(),
             () async {
               session.stdin.add(
                 asset.buffer.asUint8List(
@@ -121,6 +185,7 @@ class RemoteBackend {
               await session.stdin.close();
             }(),
           ], eagerError: true);
+          _checkEpoch(epoch);
           if (session.exitCode != 0) {
             throw StateError('Could not upload the server files.');
           }
@@ -129,7 +194,7 @@ class RemoteBackend {
           session.close();
         }
       }
-      _checkOpen();
+      _checkEpoch(epoch);
       // Publish readiness only after every upload has succeeded.
       _work = created;
     } catch (_) {
@@ -151,7 +216,9 @@ class RemoteBackend {
         fields.any((s) => s.contains('\x00'))) {
       throw ArgumentError('Invalid server action or parameters.');
     }
+    final epoch = _epoch;
     await prepare();
+    _checkEpoch(epoch);
     final session = await _execute('${_prefix}bash $_work/remote.sh $action');
     final result = <String, dynamic>{};
     String? remoteError;
@@ -197,8 +264,8 @@ class RemoteBackend {
           );
           await session.stdin.close();
         }(),
-      ], eagerError: true).timeout(commandTimeout);
-      _checkOpen();
+      ], eagerError: true);
+      _checkEpoch(epoch);
       if (session.exitCode != 0) {
         throw StateError(remoteError ?? 'Server action $action failed.');
       }
@@ -212,9 +279,21 @@ class RemoteBackend {
   Future<void> _removeWork(String path) async {
     if (!connection.client.isClosed) {
       try {
-        await connection.client.run(
-          'rm -f $path/remote.sh $path/clients.py $path/amnezia_clients.py $path/amneziawg-install.sh $path/awg_setup.py $path/vless_manager.py $path/security_manager.py; rmdir $path',
+        final session = await _execute(
+          'rm -f $path/remote.sh $path/clients.py $path/amnezia_clients.py $path/amneziawg-install.sh $path/awg_setup.py $path/vless_manager.py $path/security_manager.py $path/firewall_policy.py; rmdir $path',
+          cleanup: true,
         );
+        try {
+          await Future.wait([
+            session.done,
+            session.stdin.close(),
+            _bounded(session.stdout.cast<List<int>>()).drain<void>(),
+            _bounded(session.stderr.cast<List<int>>()).drain<void>(),
+          ], eagerError: true).timeout(const Duration(seconds: 3));
+        } finally {
+          _sessions.remove(session);
+          session.close();
+        }
       } catch (_) {
         /* The connection may already be lost. */
       }
@@ -225,6 +304,7 @@ class RemoteBackend {
 
   Future<void> _close() async {
     _closed = true;
+    _epoch++;
     for (final session in _sessions.toList()) {
       session.close();
     }

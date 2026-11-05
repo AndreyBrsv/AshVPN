@@ -87,6 +87,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byTooltip('Update available'), findsOneWidget);
+      expect(find.text('!'), findsOneWidget);
       final repository = vm.repository.transport as FixtureTransport;
       final checksBefore = repository.requests.length;
       await tester.tap(find.byTooltip('Update available'));

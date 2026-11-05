@@ -282,15 +282,41 @@ def verify_updates(distro, codename):
         raise ValueError('An external APT configuration overrides the security-only update policy.')
 
 
+def host_rules(config, tool):
+    rules = [['-i', 'lo', '-j', 'ACCEPT'],
+             ['-m', 'conntrack', '--ctstate', 'ESTABLISHED,RELATED', '-j', 'ACCEPT'],
+             ['-p', 'ipv6-icmp' if tool == 'ip6tables' else 'icmp', '-j', 'ACCEPT']]
+    for protocol in ('tcp', 'udp'):
+        rules += [['-p', protocol, '--dport', str(port), '-j', 'ACCEPT'] for port in config[protocol]]
+    return [*rules, ['-j', 'DROP']]
+
+
+def docker_rules(config):
+    return ([['-m', 'conntrack', '--ctstate', 'ESTABLISHED,RELATED', '-j', 'RETURN']]
+            + [['-p', port['protocol'], '-m', 'conntrack', '--ctorigdstport', str(port['port']), '-j', 'RETURN'] for port in config['docker_ports']]
+            + [['-m', 'conntrack', '--ctstate', 'DNAT', '-j', 'DROP'], ['-j', 'RETURN']])
+
+
+def chain_verified(tool, chain, rules):
+    current = run([tool, '-S', chain], check=False)
+    lines = [line for line in current.stdout.splitlines() if line.startswith('-A ' + chain + ' ')]
+    return (current.returncode == 0 and len(lines) == len(rules)
+            and all(run([tool, '-C', chain, *rule], check=False).returncode == 0 for rule in rules)
+            and shlex.split(lines[-1]) == ['-A', chain, *rules[-1]])
+
+
 def firewall_status(config, published):
     host = all(run([tool, '-C', 'INPUT', '-j', 'ASHAPP-IN'], check=False).returncode == 0
+               and chain_verified(tool, 'ASHAPP-IN', host_rules(config, tool))
                for tool in ('iptables', 'ip6tables'))
     required = bool(config['docker_ports']) or bool(published)
     docker = not required
     if required and published is not None:
-        docker = run(['iptables', '-C', 'DOCKER-USER', '-j', 'ASHAPP-DKR'], check=False).returncode == 0
+        docker = (run(['iptables', '-C', 'DOCKER-USER', '-j', 'ASHAPP-DKR'], check=False).returncode == 0
+                  and chain_verified('iptables', 'ASHAPP-DKR', docker_rules(config)))
         if run(['ip6tables', '-S', 'DOCKER-USER'], check=False).returncode == 0:
-            docker = docker and run(['ip6tables', '-C', 'DOCKER-USER', '-j', 'ASHAPP-DKR'], check=False).returncode == 0
+            docker = (docker and run(['ip6tables', '-C', 'DOCKER-USER', '-j', 'ASHAPP-DKR'], check=False).returncode == 0
+                      and chain_verified('ip6tables', 'ASHAPP-DKR', docker_rules(config)))
         configured = {(item['protocol'], item['port']) for item in config['docker_ports']}
         docker = docker and all((item['protocol'], item['port']) in configured for item in published)
     return {'enabled': host and docker if published is not None else None,
@@ -353,14 +379,9 @@ def firewall_reconcile():
                     run([tool, '-D', 'INPUT', '-j', 'ASHAPP-IN'])
                 run([tool, '-F', 'ASHAPP-IN']); run([tool, '-X', 'ASHAPP-IN'])
         else:
-            rules = [['-i', 'lo', '-j', 'ACCEPT'],
-                     ['-m', 'conntrack', '--ctstate', 'ESTABLISHED,RELATED', '-j', 'ACCEPT'],
-                     ['-p', 'ipv6-icmp' if tool == 'ip6tables' else 'icmp', '-j', 'ACCEPT']]
-            for protocol in ('tcp', 'udp'):
-                for port in config[protocol]:
-                    rules.append(['-p', protocol, '--dport', str(port), '-j', 'ACCEPT'])
+            rules = host_rules(config, tool)
             lines = ['*filter', ':ASHAPP-IN - [0:0]', '-F ASHAPP-IN']
-            lines += ['-A ASHAPP-IN ' + ' '.join(rule) for rule in [*rules, ['-j', 'DROP']]]
+            lines += ['-A ASHAPP-IN ' + ' '.join(rule) for rule in rules]
             if run([tool, '-C', 'INPUT', '-j', 'ASHAPP-IN'], check=False).returncode:
                 # Existing explicit allow/deny rules retain their precedence.
                 lines.append('-A INPUT -j ASHAPP-IN')
@@ -375,11 +396,8 @@ def firewall_reconcile():
                         run([tool, '-D', 'DOCKER-USER', '-j', 'ASHAPP-DKR'])
                 run([tool, '-F', 'ASHAPP-DKR']); run([tool, '-X', 'ASHAPP-DKR'])
             continue
-        lines = ['*filter', ':ASHAPP-DKR - [0:0]', '-F ASHAPP-DKR',
-                 '-A ASHAPP-DKR -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN']
-        for port in config['docker_ports']:
-            lines.append('-A ASHAPP-DKR -p ' + port['protocol'] + ' -m conntrack --ctorigdstport ' + str(port['port']) + ' -j RETURN')
-        lines += ['-A ASHAPP-DKR -m conntrack --ctstate DNAT -j DROP', '-A ASHAPP-DKR -j RETURN']
+        lines = ['*filter', ':ASHAPP-DKR - [0:0]', '-F ASHAPP-DKR']
+        lines += ['-A ASHAPP-DKR ' + ' '.join(rule) for rule in docker_rules(config)]
         if run([tool, '-C', 'DOCKER-USER', '-j', 'ASHAPP-DKR'], check=False).returncode:
             lines.append('-I DOCKER-USER 1 -j ASHAPP-DKR')
         run([tool + '-restore', '--noflush', '--wait', '10'], data='\n'.join([*lines, 'COMMIT', '']))

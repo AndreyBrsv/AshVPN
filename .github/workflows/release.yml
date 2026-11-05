@@ -3,12 +3,12 @@ name: Verify and release
 on:
   push:
     branches: [main]
-    tags: [v0.0.10]
+    tags: [v0.0.11]
   pull_request:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish v0.0.10 after all three native builds succeed
+        description: Publish each v0.0.11 target as soon as it passes
         type: boolean
         default: false
 
@@ -20,125 +20,70 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-start:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Create source archive
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+        run: |
+          python3 tool/check_secrets.py
+          mkdir release-source
+          git archive --format=zip --prefix=Ashapp-0.0.11/ --output=release-source/Ashapp-v0.0.11-source.zip "$GITHUB_SHA"
+      - uses: actions/attest@4d7d407517fe0a9f57ab8ca277dfd2efb1188c7f
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main' && !github.event.repository.private
+        with:
+          subject-path: release-source/*.zip
+      - name: Create release with matching source
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          marker="<!-- ashapp-release-run:${GITHUB_RUN_ID}:${GITHUB_SHA} -->"
+          if gh release view v0.0.11 --json body --jq .body > existing-notes.txt 2>/dev/null; then
+            grep -Fxq "$marker" existing-notes.txt
+            test "$(gh api repos/${{ github.repository }}/git/ref/tags/v0.0.11 --jq .object.sha)" = "$GITHUB_SHA"
+          else
+            test -z "$(git tag -l v0.0.11)"
+            cat docs/RELEASE_NOTES.md > release-notes.txt
+            printf '\n%s\n' "$marker" >> release-notes.txt
+            gh release create v0.0.11 --target "$GITHUB_SHA" --title "Ashapp v0.0.11" --notes-file release-notes.txt --latest
+          fi
+          python tool/upload_release_assets.py v0.0.11 release-source/*
+
   native:
+    needs: release-start
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: windows-2022
             target: windows-x64
+            arch: ''
           - runner: macos-15-intel
             target: macos-x64
             arch: x86_64
           - runner: macos-15-intel
             target: macos-arm64
             arch: arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
     permissions:
-      contents: read
+      contents: write
       id-token: write
       attestations: write
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Validate macOS maintenance helper
-        if: runner.os == 'macOS'
-        run: xcrun swiftc -typecheck tool/macos_maintenance.swift
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
-        with:
-          python-version: '3.13'
-      - uses: subosito/flutter-action@4cab68ce0f1c7c924f688bff4792e044f1aeb30c
-        with:
-          flutter-version: '3.47.9'
-          channel: stable
-          cache: false
-      - name: Validate SDK and dependencies
-        working-directory: flutter
-        run: |
-          flutter --version
-          flutter pub get --enforce-lockfile
-          git diff --exit-code -- pubspec.lock
-      - name: Analyze and test application
-        working-directory: flutter
-        run: |
-          dart format --output=none --set-exit-if-changed lib test
-          flutter analyze --no-pub
-          flutter test --no-pub
-      - name: Test server commands locally
-        env:
-          PYTHONUTF8: '1'
-        run: |
-          python -m unittest discover -s tests -v
-          bash -n server/remote.sh
-          bash -n vendor/amneziawg-install.sh
-      - name: Check source for secrets
-        run: python tool/check_secrets.py
-      - name: Ensure Windows C++ ATL
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $atl = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.ATL -property installationPath
-          if (-not $atl) {
-            $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-            if (-not $installation) { throw 'Install Desktop development with C++ first.' }
-            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
-            $arguments = @('modify', '--installPath', "`"$installation`"", '--add', 'Microsoft.VisualStudio.Component.VC.ATL', '--quiet', '--norestart')
-            $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-            if ($process.ExitCode -notin @(0, 3010)) { throw "ATL installation failed: $($process.ExitCode)" }
-          }
-      - name: Build Windows
-        if: runner.os == 'Windows'
-        working-directory: flutter
-        run: flutter build windows --release --no-pub
-      - name: Test Windows private export permissions
-        if: runner.os == 'Windows'
-        run: |
-          cmake -S flutter/windows/runner/tests -B flutter/build/private-export-tests
-          cmake --build flutter/build/private-export-tests --config Release
-          ctest --test-dir flutter/build/private-export-tests -C Release --output-on-failure
-      - name: Build and test macOS
-        if: runner.os == 'macOS'
-        working-directory: flutter
-        env:
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: |
-          HOST_ARCH="$(uname -m)"
-          flutter config --no-enable-macos-arm64-only
-          if [ "$TARGET_ARCH" = arm64 ]; then EXCLUDED=x86_64; else EXCLUDED=arm64; fi
-          printf 'ARCHS = %s\nEXCLUDED_ARCHS = %s\n' "$TARGET_ARCH" "$EXCLUDED" > macos/Runner/Configs/LocalArchitecture.xcconfig
-          flutter build macos --release --no-pub
-          RESULT=build/macos/RunnerTests.xcresult
-          if ! xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -configuration Debug -destination "platform=macOS,arch=$HOST_ARCH" -resultBundlePath "$RESULT" CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual; then
-            xcrun xcresulttool get test-results summary --path "$RESULT" --compact || true
-            exit 1
-          fi
-      - name: Package native release
-        run: python tool/package_release.py ${{ matrix.target }}
-      - name: Smoke test Windows installer in disposable CI profile
-        if: runner.os == 'Windows'
-        run: python tool/smoke_windows_installer.py
-      - name: Attest native archive provenance
-        if: github.event_name != 'pull_request' && !github.event.repository.private
-        uses: actions/attest@4d7d407517fe0a9f57ab8ca277dfd2efb1188c7f
-        with:
-          subject-path: |
-            release-output/*.zip
-            release-output/*.exe
-            release-output/*.pkg
-            release-output/*.dmg
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: ${{ matrix.target }}
-          path: release-output/*
-          if-no-files-found: error
-          retention-days: 7
+    uses: ./.github/workflows/build-target.yml
+    with:
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+      arch: ${{ matrix.arch }}
+      publish: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main' }}
 
   publish:
     needs: native
@@ -160,24 +105,11 @@ jobs:
         with:
           path: release-output
           merge-multiple: true
-      - run: python tool/prepare_release.py release-output
-      - uses: actions/attest@4d7d407517fe0a9f57ab8ca277dfd2efb1188c7f
-        if: '!github.event.repository.private'
-        with:
-          subject-path: release-output/Ashapp-v0.0.10-source.zip
-      - name: Publish verified assets
+      - name: Publish combined checksums after all platforms succeed
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if git rev-parse --verify refs/tags/v0.0.10 >/dev/null 2>&1; then
-            test "$(git rev-parse 'refs/tags/v0.0.10^{commit}')" = "$GITHUB_SHA"
-          fi
-          if gh release view v0.0.10 --json isDraft,targetCommitish >/dev/null 2>&1; then
-            test "$(gh release view v0.0.10 --json isDraft --jq .isDraft)" = true
-            test "$(gh release view v0.0.10 --json targetCommitish --jq .targetCommitish)" = "$GITHUB_SHA"
-            gh release upload v0.0.10 release-output/* --clobber
-          else
-            gh release create v0.0.10 release-output/* --draft --target "$GITHUB_SHA" --title "Ashapp v0.0.10" --notes-file docs/RELEASE_NOTES.md
-          fi
-          gh release edit v0.0.10 --draft=false --latest
+          rm release-output/Ashapp-v0.0.11-*-SHA256SUMS
+          python tool/prepare_release.py release-output
+          python tool/upload_release_assets.py v0.0.11 release-output/SHA256SUMS

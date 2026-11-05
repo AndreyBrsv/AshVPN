@@ -200,7 +200,7 @@ void main() {
   });
 
   test(
-    'rejects drafts, prereleases, duplicate files and partial platform uploads',
+    'rejects drafts, prereleases, duplicate files and missing local assets',
     () {
       for (final field in ['draft', 'prerelease']) {
         final raw = releaseFixture(transport)..[field] = true;
@@ -216,15 +216,40 @@ void main() {
         throwsA(isA<UpdateException>()),
       );
       raw = releaseFixture(transport);
-      (raw['assets'] as List).removeAt(
-        2,
-      ); // Another OS is missing; Windows must wait.
+      (raw['assets'] as List).removeAt(0);
       expect(
         () => AppRelease.newer(raw, current),
         throwsA(isA<UpdateException>()),
       );
     },
   );
+
+  test('accepts a ready platform without the other platforms', () {
+    final raw = releaseFixture(transport);
+    (raw['assets'] as List).removeWhere(
+      (item) => (item['name'] as String).contains('macos-'),
+    );
+    expect(AppRelease.newer(raw, current)!.installer.name, contains('windows'));
+    final mac = UpdatePlatform(version: current.version, target: 'macos-x64');
+    expect(() => AppRelease.newer(raw, mac), throwsA(isA<UpdateException>()));
+  });
+
+  test('uses platform checksum when present and rejects a malformed one', () {
+    final raw = releaseFixture(transport);
+    final assets = raw['assets'] as List;
+    final oldSums = Map<String, dynamic>.from(assets.last as Map);
+    const name = 'Ashapp-v0.0.4-windows-x64-SHA256SUMS';
+    oldSums['name'] = name;
+    oldSums['browser_download_url'] =
+        'https://github.com/AndreyBrsv/Ashapp/releases/download/v0.0.4/$name';
+    assets.add(oldSums);
+    expect(AppRelease.newer(raw, current)!.checksums.name, name);
+    oldSums['digest'] = null;
+    expect(
+      () => AppRelease.newer(raw, current),
+      throwsA(isA<UpdateException>()),
+    );
+  });
 
   test('refuses unexpected URLs, missing hashes and oversized installers', () {
     for (final entry in [
@@ -358,33 +383,31 @@ void main() {
     expect(transport.requests.length, 2);
   });
 
-  test(
-    'recent check and corrupt preferences do not trigger background traffic',
-    () async {
-      await vm.preferences.write({
-        'version': 1,
-        'automatic': true,
-        'last_checked': DateTime.now().toUtc().toIso8601String(),
-      });
-      await vm.start();
-      expect(transport.requests, isEmpty);
-      vm.dispose();
-      await File(path.join(root.path, 'update-settings.json'))
-          .writeAsString('broken');
-      vm = AppUpdateController(
-        repository: repository,
-        runtime: runtime,
-        preferences: JsonFileStore(
-          File(path.join(root.path, 'update-settings.json')),
-        ),
-      );
-      await vm.start();
-      expect(vm.automatic, isFalse);
-      expect(transport.requests, isEmpty);
-      await vm.check();
-      expect(vm.release, isNotNull);
-    },
-  );
+  test('startup rechecks recent results and corrupt preferences disable background traffic', () async {
+    await vm.preferences.write({
+      'version': 1,
+      'automatic': true,
+      'last_checked': DateTime.now().toUtc().toIso8601String(),
+    });
+    await vm.start();
+    expect(transport.requests.length, 1);
+    expect(vm.release, isNotNull);
+    vm.dispose();
+    await File(path.join(root.path, 'update-settings.json'))
+        .writeAsString('broken');
+    vm = AppUpdateController(
+      repository: repository,
+      runtime: runtime,
+      preferences: JsonFileStore(
+        File(path.join(root.path, 'update-settings.json')),
+      ),
+    );
+    await vm.start();
+    expect(vm.automatic, isFalse);
+    expect(transport.requests.length, 1);
+    await vm.check();
+    expect(vm.release, isNotNull);
+  });
 
   test('installation is blocked while any server is busy and checked again after verification', () async {
     await vm.check();

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import io
 import ipaddress
 import json
@@ -232,7 +233,7 @@ def firewall_text(port):
 set -eu
 case "${{1:-}}" in
  start|restart|reload)
-  iptables -C {rule} 2>/dev/null || iptables -I {rule}
+  iptables -C {rule} 2>/dev/null || iptables -A {rule}
   ;;
  flush)
   if iptables -C {rule} 2>/dev/null; then iptables -D {rule}; fi
@@ -312,10 +313,12 @@ class VlessManager:
                  'configured': True, 'stats_available': False, 'can_export': True, 'can_import': False,
                  'can_revoke': True, 'can_rename': True} for c in self.load()['clients']]
 
-    def apply(self, state, initial=False):
+    def apply(self, state, initial=False, baseline=None):
         self.warning = None
         checked_state(state)
         before = None if initial else self.load()
+        if baseline is not None and before != baseline:
+            raise RuntimeError('VLESS state changed concurrently. Refresh first.')
         previous_state = None if initial else self.state_path.read_text(encoding='utf-8')
         previous_config = None if initial else self.config_path.read_text(encoding='utf-8')
         active = self.running()
@@ -383,6 +386,10 @@ class VlessManager:
             raise RuntimeError('Dedicated VLESS paths are occupied. Existing installations will not be replaced.')
         existing_public_directory(self.directory.parent)
         existing_public_directory(BINARY.parent)
+        policy_spec = importlib.util.spec_from_file_location('ashapp_firewall_policy', Path(__file__).with_name('firewall_policy.py'))
+        policy = importlib.util.module_from_spec(policy_spec)
+        policy_spec.loader.exec_module(policy)
+        policy.check_install_policy(self.command)
         try:
             with socket.socket() as probe:
                 probe.bind(('0.0.0.0', port))
@@ -455,15 +462,17 @@ class VlessManager:
     def action(self, action, fields):
         if action == 'add-client' and len(fields) == 2:
             state = self.load()
+            baseline = json.loads(json.dumps(state))
             name = client_name(fields[0])
             if any(c['name'] == name for c in state['clients']):
                 raise ValueError('A VLESS client with this name already exists.')
             state['clients'].append(dict(name=name, uuid=str(uuid.uuid4()), short_id=secrets.token_hex(8)))
-            self.apply(state)
+            self.apply(state, baseline=baseline)
             return {'created': True, **({'warning': self.warning} if self.warning else {})}
         if action not in ('get-client', 'revoke-client', 'rename-client') or len(fields) != (4 if action == 'rename-client' else 3):
             raise ValueError('Invalid VLESS client operation.')
         state = self.load()
+        baseline = json.loads(json.dumps(state))
         client = self.identity(state, fields[2])
         if action == 'get-client':
             # Explicit allowlist. Server private key and administration never leave the manager.
@@ -477,7 +486,7 @@ class VlessManager:
             if any(c is not client and c['name'] == replacement for c in state['clients']):
                 raise ValueError('A VLESS client with this name already exists.')
             client['name'] = replacement
-        self.apply(state)
+        self.apply(state, baseline=baseline)
         return {'revoked' if action == 'revoke-client' else 'renamed': True,
                 **({'warning': self.warning} if self.warning else {})}
 

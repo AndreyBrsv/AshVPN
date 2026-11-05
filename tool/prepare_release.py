@@ -7,9 +7,13 @@ from pathlib import Path
 from package_release import ROOT, VERSION, sha256
 
 
-def prepare(output):
+def prepare(output, target=None):
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    expected = ('windows-x64', 'macos-x64', 'macos-arm64')
+    selected_target = target
+    targets = ('windows-x64', 'macos-x64', 'macos-arm64')
+    if target is not None and target not in targets:
+        raise ValueError('Unsupported target.')
+    expected = (target,) if target else targets
     artifacts = []
     for target in expected:
         stem = f'Ashapp-v{VERSION}-{target}'
@@ -32,6 +36,14 @@ def prepare(output):
                     or manifest.get('maintenance_size') != maintenance.stat().st_size):
                 raise ValueError('Maintenance identity or checksum mismatch.')
             artifacts.append(maintenance)
+    if selected_target:
+        allowed = {item.name for item in artifacts}
+        sums = output / f'Ashapp-v{VERSION}-{selected_target}-SHA256SUMS'
+        if any(item.name not in allowed | {sums.name} for item in output.iterdir()):
+            raise ValueError('Unexpected files in release output.')
+        sums.write_text(''.join(f'{sha256(p)}  {p.name}\n' for p in artifacts), encoding='utf-8')
+        print(f'{selected_target} v{VERSION} verified against {revision}.')
+        return
     source = output / f'Ashapp-v{VERSION}-source.zip'
     subprocess.run(['git', 'archive', '--format=zip', f'--prefix=Ashapp-{VERSION}/',
                     f'--output={source}', revision], cwd=ROOT, check=True)
@@ -46,4 +58,6 @@ def prepare(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('output', type=Path)
-    prepare(parser.parse_args().output.resolve())
+    parser.add_argument('--target', choices=('windows-x64', 'macos-x64', 'macos-arm64'))
+    args = parser.parse_args()
+    prepare(args.output.resolve(), args.target)

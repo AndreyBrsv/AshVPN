@@ -104,9 +104,57 @@ def peer_blocks(text):
     return records
 
 
-def sync(iface, path):
-    stripped = run(["awg-quick", "strip", str(path)]).stdout
-    run(["awg", "syncconf", iface, "/dev/stdin"], stripped)
+def runtime_peers(iface):
+    peers = {}
+    for block in run(['awg', 'showconf', iface]).stdout.split('[Peer]')[1:]:
+        cfg = assignments(block)
+        public = cfg.get('PublicKey')
+        if not public or public in peers:
+            raise RuntimeError('Active VPN peers could not be verified. Refresh first.')
+        peers[public] = cfg
+    return peers
+
+
+def peer_matches(actual, expected):
+    if actual is None or expected is None:
+        return actual is expected
+    def routes(peer):
+        return {ipaddress.ip_network(s.strip(), strict=False) for s in peer.get('AllowedIPs', '').split(',') if s.strip()}
+    return (actual.get('PublicKey') == expected.get('PublicKey')
+            and actual.get('PresharedKey', '') == expected.get('PresharedKey', '')
+            and routes(actual) == routes(expected))
+
+
+def apply_peer(iface, public, peer):
+    if peer is None:
+        run(['awg', 'set', iface, 'peer', public, 'remove'])
+    else:
+        # addconf merges only this peer; syncconf would remove runtime-only peers.
+        text = '[Peer]\n' + ''.join(f'{key} = {value}\n' for key, value in peer.items())
+        run(['awg', 'addconf', iface, '/dev/stdin'], text)
+    if not peer_matches(runtime_peers(iface).get(public), peer):
+        raise RuntimeError('The selected active VPN peer could not be verified.')
+
+
+class PeerRecoveryError(RuntimeError):
+    pass
+
+
+def change_host_peer(iface, path, original, new, public, before, after, live):
+    if path.read_text() != original or runtime_peers(iface) != live:
+        raise RuntimeError('VPN configuration changed concurrently. Refresh first.')
+    try:
+        atomic_write(path, new)
+        apply_peer(iface, public, after)
+    except Exception:
+        try:
+            if path.read_text() not in (new, original):
+                raise RuntimeError('Saved VPN configuration changed during recovery.')
+            atomic_write(path, original)
+            apply_peer(iface, public, before)
+        except Exception:
+            raise PeerRecoveryError('VPN peer update and recovery could not be verified. Inspect the saved configuration and active interface before retrying. Any new private export was retained in protected server storage.') from None
+        raise
 
 
 def verified_kernel(iface):
@@ -273,7 +321,8 @@ def status():
                                 result['socks5_access_warning'] = str(error)
                         break
     icmp = run(["iptables", "-C", "INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-j", "DROP"], check=False)
-    result["icmp_blocked"] = icmp.returncode == 0
+    owned_icmp = run(["iptables", "-C", "INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-m", "comment", "--comment", "ashapp-owned-icmp-v1", "-j", "DROP"], check=False)
+    result["icmp_blocked"] = icmp.returncode == 0 or owned_icmp.returncode == 0
     proc = run(["/usr/sbin/sshd", "-T"], check=False)
     result["ssh"] = dict(line.split(None, 1) for line in proc.stdout.splitlines()
                          if line.startswith(("permitrootlogin ", "passwordauthentication ")))
@@ -381,12 +430,17 @@ def add_client(name):
     if not verified_kernel(iface):
         raise RuntimeError("A running kernel interface is required to add clients.")
     cfg = interface_values(original)
+    live = runtime_peers(iface)
     server_addresses = [ipaddress.ip_interface(s.strip()) for s in cfg["Address"].split(",")]
     # Reserve complete routed networks, including peers without a Varckin marker.
     # A peer with /24 AllowedIPs owns that route, not just its first address.
     reserved = []
     for peer in original.split("[Peer]")[1:]:
         for address in assignments(peer).get("AllowedIPs", "").split(","):
+            if address.strip():
+                reserved.append(ipaddress.ip_network(address.strip(), strict=False))
+    for peer in live.values():
+        for address in peer.get('AllowedIPs', '').split(','):
             if address.strip():
                 reserved.append(ipaddress.ip_network(address.strip(), strict=False))
     server_ips = {item.ip for item in server_addresses}
@@ -404,6 +458,8 @@ def add_client(name):
         chosen.append(candidate)
     private = run(["awg", "genkey"]).stdout.strip()
     public = run(["awg", "pubkey"], private + "\n").stdout.strip()
+    if public in live:
+        raise RuntimeError('Generated client identity already exists. Retry with a new key.')
     server_public = run(["awg", "pubkey"], cfg["PrivateKey"] + "\n").stdout.strip()
     psk = run(["awg", "genpsk"]).stdout.strip()
     dns = params.get("CLIENT_DNS_1", "1.1.1.1")
@@ -429,15 +485,12 @@ def add_client(name):
     CLIENTS_DIR.chmod(0o700)
     atomic_write(destination, "\n".join(client))
     try:
-        atomic_write(path, new)
-        sync(iface, path)
+        change_host_peer(iface, path, original, new, public, None,
+                         dict(PublicKey=public, PresharedKey=psk, AllowedIPs=','.join(chosen)), live)
+    except PeerRecoveryError:
+        raise
     except Exception:
-        atomic_write(path, original)
         destination.unlink(missing_ok=True)
-        try:
-            sync(iface, path)
-        except Exception:
-            pass
         raise
     return {"name": name, "created": True}
 
@@ -449,7 +502,8 @@ def get_client(name):
         raise RuntimeError("Client not found.")
     content = client_path(iface, name).read_bytes().decode('utf-8')
     client_helpers().validate_configuration(content, interface_values(text), blocks[0], blocks[0].get('PublicKey'),
-        lambda private: run(['awg', 'pubkey'], private + '\n').stdout.strip())
+        lambda private: run(['awg', 'pubkey'], private + '\n').stdout.strip(),
+        expected_port=int(interface_values(text)['ListenPort']))
     return {"name": name, "config": content}
 
 
@@ -459,7 +513,8 @@ def import_client_configuration(name, public, content, replace=False):
     if len(blocks) != 1 or blocks[0].get('PublicKey') != public:
         raise RuntimeError('The client identity changed. Refresh first.')
     client_helpers().validate_configuration(content, interface_values(text), blocks[0], public,
-        lambda private: run(['awg', 'pubkey'], private + '\n').stdout.strip())
+        lambda private: run(['awg', 'pubkey'], private + '\n').stdout.strip(),
+        expected_port=int(interface_values(text)['ListenPort']))
     destination = CLIENTS_DIR / f'{iface}-client-{name}.conf'
     try:
         previous = client_path(iface, name)
@@ -482,20 +537,16 @@ def revoke_client(name):
         raise RuntimeError("Client name is missing or ambiguous.")
     start, end = matches[0]
     new = original[:start] + original[end:]
-    try:
-        atomic_write(path, new)
-        sync(iface, path)
-    except Exception:
-        atomic_write(path, original)
-        try:
-            sync(iface, path)
-        except Exception:
-            pass
-        raise
+    public = assignments(original[start:end])['PublicKey']
+    live = runtime_peers(iface)
+    before = live.get(public)
+    change_host_peer(iface, path, original, new, public, before, None, live)
     try:
         client_path(iface, name).unlink()
     except RuntimeError:
         pass
+    except OSError:
+        return {'revoked': True, 'warning': 'Access was revoked, but the old private export could not be erased. Remove it from protected server storage.'}
     return {"revoked": True}
 
 
@@ -561,14 +612,23 @@ def rename_client(name, replacement):
     destination = CLIENTS_DIR / f'{iface}-client-{replacement}.conf'
     if destination.exists():
         raise RuntimeError('The destination client file already exists.')
+    candidate = original[:start] + block + original[end:]
+    replacing = False
     try:
         if previous:
             atomic_write(destination, previous.read_text())
-        atomic_write(path, original[:start] + block + original[end:])
+        if path.read_text() != original:
+            raise RuntimeError('VPN configuration changed concurrently. Refresh first.')
+        replacing = True
+        atomic_write(path, candidate)
         if previous:
             previous.unlink()
     except Exception:
-        atomic_write(path, original)
+        current = path.read_text()
+        if replacing and current == candidate:
+            atomic_write(path, original)
+        elif replacing and current != original:
+            raise RuntimeError('VPN configuration changed during rename recovery. Concurrent edits and protected client exports were preserved; inspect them before retrying.') from None
         destination.unlink(missing_ok=True)
         raise
     return {'renamed': True}
