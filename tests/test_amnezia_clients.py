@@ -104,6 +104,16 @@ class ManagementTests(unittest.TestCase):
                 self.assertEqual(data, {'clientName': 'Новый телефон', 'extra': 7})
                 self.assertEqual(self.transactions[-1][0][-1], 'rename')
 
+    def test_new_address_is_above_all_saved_and_runtime_peers_for_official_next_allocation(self):
+        # The final saved peer is lower than a previous one, as after a hole
+        # reuse or external edit. The next official client uses final IP + 1.
+        self.config += '\n[Peer]\nPublicKey = ' + key(8) + '\nAllowedIPs = 10.8.0.5/32\n'
+        self.config += '\n[Peer]\nPublicKey = ' + key(7) + '\nAllowedIPs = 10.8.0.3/32\n'
+        self.runtime = self.config
+        created = self.manager.add('New phone', '203.0.113.10', '9.9.9.9')
+        self.assertIn('Address = 10.8.0.6/32', self.manager.export(created['public_key'])['config'])
+        self.assertTrue(self.config.rstrip().endswith('AllowedIPs = 10.8.0.6/32'))
+
     def test_revoke_uses_key_and_keeps_unrelated_peer(self):
         self.config += '\n[Peer]\nPublicKey = ' + key(8) + '\nAllowedIPs = 10.8.0.5/32\n'
         self.manager.revoke(key(2))

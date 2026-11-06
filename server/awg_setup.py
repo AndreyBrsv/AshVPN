@@ -196,6 +196,24 @@ def activate_configuration(clients, directory, params, config,
         raise
 
 
+def install_kernel_packages(clients, base):
+    """Reuse the reviewed vendor package routine without creating a VPN."""
+    script = package_script((base / 'amneziawg-install.sh').read_bytes())
+    # Debian cloud images may use deb822 sources without a sources.list file.
+    sources = Path('/etc/apt/sources.list')
+    sources.touch(exist_ok=True)
+    deb822 = Path('/etc/apt/sources.list.d/debian.sources')
+    if deb822.exists():
+        content = deb822.read_text()
+        if 'deb-src' not in content:
+            clients.atomic_write(Path('/etc/apt/sources.list.d/ashapp-debian-src.sources'),
+                                 content.replace('Types: deb', 'Types: deb deb-src'), 0o644)
+    subprocess.run(['bash', '-c', script], check=True)
+    clients.run(['modprobe', 'amneziawg'])
+    if not Path('/sys/module/amneziawg').exists():
+        raise ValueError('The AmneziaWG kernel module did not load.')
+
+
 def main(arguments=()):
     if os.geteuid() != 0:
         raise ValueError('Kernel setup requires root.')
@@ -236,20 +254,7 @@ def main(arguments=()):
             raise ValueError('The VPN subnet 10.66.66.0/24 overlaps an existing route.')
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.bind(('0.0.0.0', port))
-    script = package_script((base / 'amneziawg-install.sh').read_bytes())
-    # Debian cloud images may use deb822 sources without a sources.list file.
-    sources = Path('/etc/apt/sources.list')
-    sources.touch(exist_ok=True)
-    deb822 = Path('/etc/apt/sources.list.d/debian.sources')
-    if deb822.exists():
-        content = deb822.read_text()
-        if 'deb-src' not in content:
-            clients.atomic_write(Path('/etc/apt/sources.list.d/ashapp-debian-src.sources'),
-                                 content.replace('Types: deb', 'Types: deb deb-src'), 0o644)
-    subprocess.run(['bash', '-c', script], check=True)
-    clients.run(['modprobe', 'amneziawg'])
-    if not Path('/sys/module/amneziawg').exists():
-        raise ValueError('The AmneziaWG kernel module did not load.')
+    install_kernel_packages(clients, base)
     private = clients.run(['awg', 'genkey']).stdout.strip()
     public = clients.run(['awg', 'pubkey'], private + '\n').stdout.strip()
     params, config = configure(host, port, dns, nic, private, public)

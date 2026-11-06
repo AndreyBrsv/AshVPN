@@ -36,6 +36,7 @@ class _CreateClientDialogState extends State<CreateClientDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
     title: const Text('Create VPN client'),
     content: SizedBox(
       width: 480,

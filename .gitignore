@@ -34,6 +34,10 @@ id_dsa*
 *.ovpn
 *.wg
 *.conf
+*.vpn
+*.vpnuri
+*.vpnlink
+*.vpnuri.png
 *.mobileconfig
 *.log
 *.bak

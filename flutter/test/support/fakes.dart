@@ -117,6 +117,8 @@ class FakeServer {
   final users = <String>{};
   final calls = <(String, List<String>, String)>[];
   String? failAction;
+  String? failAfterCredentialCommit;
+  bool failFailureReports = false;
   String failureMessage = 'Simulated server failure.';
   String? configuration;
   Map<String, dynamic>? vlessConnection;
@@ -130,6 +132,17 @@ class FakeServer {
     'firewall': {'enabled': false, 'managed': false},
     'automatic_updates': {'enabled': false, 'managed': false},
   };
+  Map<String, dynamic> lifecycle = {
+    'schema': 1,
+    'status': 'idle',
+    'steps': <String, dynamic>{},
+    'events': <dynamic>[],
+    'owned_services': <String, bool>{},
+  };
+  List<Map<String, dynamic>> checks = [
+    {'id': 'ssh', 'status': 'pass', 'detail': 'SSH configuration readable.'},
+  ];
+  int runCount = 0;
   Map<String, dynamic>? pendingSecurity;
 }
 
@@ -147,15 +160,116 @@ class FakeBackend extends Fake implements RemoteBackend {
   Future<Map<String, dynamic>> run(
     String action, [
     List<String> fields = const [],
-  ]) async {
+  ]) async => Map<String, dynamic>.from(
+    jsonDecode(jsonEncode(await _run(action, fields))) as Map,
+  );
+
+  Future<Map<String, dynamic>> _run(String action, List<String> fields) async {
     if (closed) throw StateError('Closed backend.');
     server.calls.add((action, List.of(fields), username));
     await server.gate?.future;
-    if (server.failAction == action ||
+    if ((server.failFailureReports &&
+            {'lifecycle-step', 'lifecycle-finish'}.contains(action) &&
+            fields.last == 'failed') ||
+        server.failAction == action ||
         (action == 'preflight' && username != 'root' && server.denyAdmin)) {
       throw StateError(server.failureMessage);
     }
     switch (action) {
+      case 'lifecycle-status':
+        return Map.of(server.lifecycle);
+      case 'lifecycle-begin':
+        final request = jsonDecode(fields[0]) as Map;
+        if (request['resume'] == true) {
+          if (request['run_id'] != server.lifecycle['run_id'] ||
+              jsonEncode(request['desired']) !=
+                  jsonEncode(server.lifecycle['desired'])) {
+            throw StateError('Stale recovery plan.');
+          }
+        } else {
+          server.lifecycle = {
+            'schema': 1,
+            'run_id': 'test-run-${++server.runCount}',
+            'status': 'running',
+            'desired': request['desired'],
+            'steps': <String, dynamic>{
+              for (final id in request['steps'] as List)
+                id as String: <String, dynamic>{'state': 'waiting'},
+            },
+            'events': <dynamic>[],
+            'owned_services': server.lifecycle['owned_services'],
+          };
+        }
+        server.lifecycle['status'] = 'running';
+        return Map.of(server.lifecycle);
+      case 'lifecycle-step':
+        final steps = server.lifecycle['steps'] as Map;
+        steps[fields[1]] = {
+          ...(steps[fields[1]] as Map? ?? {}),
+          'state': fields[2],
+        };
+        return Map.of(server.lifecycle);
+      case 'lifecycle-finish':
+        server.lifecycle['status'] = fields[1];
+        return Map.of(server.lifecycle);
+      case 'diagnostics':
+        return {
+          'checks': server.checks,
+          'actual': {
+            'server': Map.of(server.state),
+            'security': {...server.security, 'ssh': server.state['ssh']},
+          },
+          'lifecycle': Map.of(server.lifecycle),
+        };
+      case 'security-reset-preview':
+        return {
+          'available': true,
+          'digest': 'test-security-reset',
+          'notice': 'Restore original owned policy.',
+        };
+      case 'security-reset-stage':
+        server.pendingSecurity = {
+          'disable_root': false,
+          'disable_passwords': false,
+          'firewall': false,
+          'fail2ban': false,
+          'automatic_updates': false,
+        };
+        return {'token': 'test-token', 'rollback_seconds': 180};
+      case 'reset-preview':
+        return {
+          'digest': 'test-reset',
+          'components': [
+            {
+              'id': 'awg',
+              'label': 'AmneziaWG',
+              'removable': true,
+              'reason': 'Owned installation.',
+            },
+          ],
+          'notice': 'Preserve accounts and packages.',
+        };
+      case 'reset':
+        server.state.addAll({
+          'awg': false,
+          'awg_configured': false,
+          'kernel': false,
+          'socks5': false,
+          'socks5_configured': false,
+          'vless': false,
+          'vless_configured': false,
+        });
+        server.lifecycle = {
+          'schema': 1,
+          'status': 'reset',
+          'steps': <String, dynamic>{},
+          'events': <dynamic>[],
+          'owned_services': <String, bool>{},
+        };
+        return {
+          'removed': ['awg'],
+          'warnings': <String>[],
+        };
       case 'security-status':
         return {
           ...server.security,
@@ -171,6 +285,7 @@ class FakeBackend extends Fake implements RemoteBackend {
           },
           'notice': 'Test preview',
         };
+      case 'security-setup':
       case 'security-stage':
         server.pendingSecurity = jsonDecode(fields[0]) as Map<String, dynamic>;
         return {'token': 'test-token', 'rollback_seconds': 180};
@@ -213,7 +328,14 @@ class FakeBackend extends Fake implements RemoteBackend {
           'clients':
               server.clientRows ??
               [
-                for (final n in server.clients) {'name': n, 'handshake': 0},
+                for (final n in server.clients)
+                  {
+                    'name': n,
+                    'handshake': 0,
+                    'source': server.state['awg_deployment'] == 'amnezia'
+                        ? 'amnezia-awg2'
+                        : (server.state['interface'] ?? 'awg0'),
+                  },
               ],
           'warnings': server.clientWarnings,
         };
@@ -226,6 +348,15 @@ class FakeBackend extends Fake implements RemoteBackend {
         };
       case 'create-user':
         server.users.add(fields[0]);
+        _credentialCommitted('administrator');
+        if (server.failAfterCredentialCommit == action) {
+          throw StateError(server.failureMessage);
+        }
+      case 'root-password':
+        _credentialCommitted('root-password');
+        if (server.failAfterCredentialCommit == action) {
+          throw StateError(server.failureMessage);
+        }
       case 'ssh-config':
         if (fields[1] == 'no') {
           server.state['ssh'] = {
@@ -244,6 +375,20 @@ class FakeBackend extends Fake implements RemoteBackend {
           'awg_configured': true,
           'kernel': true,
           'awg_port': int.parse(fields[1]),
+        });
+      case 'install-awg-amnezia':
+        server.state.addAll({
+          'awg': true,
+          'interface': 'awg0',
+          'awg_configured': true,
+          'awg_host_configured': false,
+          'awg_deployment': 'amnezia',
+          'awg_shared_guard': true,
+          'kernel': true,
+          'awg_port': int.parse(fields[1]),
+          'external_awg': [
+            {'source': 'amnezia-awg2', 'running': true, 'kernel': true},
+          ],
         });
       case 'add-client':
         server.clients.add(fields[0]);
@@ -308,6 +453,14 @@ class FakeBackend extends Fake implements RemoteBackend {
         server.state['vless'] = fields[0] != 'stop';
     }
     return {};
+  }
+
+  void _credentialCommitted(String id) {
+    final steps = server.lifecycle['steps'] as Map?;
+    if (server.lifecycle['status'] == 'running' &&
+        (steps?[id] as Map?)?['state'] == 'running') {
+      (steps![id] as Map)['credential_state'] = 'committed';
+    }
   }
 
   @override

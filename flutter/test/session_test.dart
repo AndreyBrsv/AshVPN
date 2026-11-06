@@ -93,7 +93,9 @@ void main() {
         lessThan(actions.indexOf('create-user')),
       );
       final disable = h.server.calls.indexWhere(
-        (c) => c.$1 == 'security-stage' && c.$2[0].contains('disable_root'),
+        (c) =>
+            {'security-stage', 'security-setup'}.contains(c.$1) &&
+            c.$2[0].contains('disable_root'),
       );
       expect(
         h.server.calls
@@ -232,7 +234,9 @@ void main() {
       );
       expect(h.vm.clients, isEmpty);
       expect(h.vm.socks, isNull);
-      expect(h.vm.log, isEmpty);
+      expect(h.vm.log, contains('Connecting to 203.0.113.20:22.'));
+      expect(h.vm.log, isNot(contains('203.0.113.10')));
+      expect(h.vm.log, isNot(contains(protectedAnswers.adminPassword)));
       expect(h.vm.ssh!.host, '203.0.113.20');
     },
   );

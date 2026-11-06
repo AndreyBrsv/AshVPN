@@ -126,7 +126,10 @@ class RemoteBackend {
         _bounded(session.stdout.cast<List<int>>())
             .transform(utf8.decoder)
             .join(),
-        _bounded(session.stderr.cast<List<int>>()).drain<void>(),
+        _bounded(session.stderr.cast<List<int>>())
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .forEach(_emit),
         session.stdin.close(),
       ], eagerError: true);
       return (exitCode: session.exitCode, stdout: results[1] as String);
@@ -138,6 +141,7 @@ class RemoteBackend {
 
   Future<void> _prepare() async {
     final epoch = _epoch;
+    _emit('[SSH] Preparing protected server helpers.');
     if (username != 'root') {
       final sudo = await _capture('sudo -n true');
       _checkEpoch(epoch);
@@ -162,9 +166,12 @@ class RemoteBackend {
         'amnezia_clients.py',
         'amneziawg-install.sh',
         'awg_setup.py',
+        'amnezia_setup.py',
         'vless_manager.py',
         'security_manager.py',
         'firewall_policy.py',
+        'lifecycle.py',
+        'docker_setup.py',
       ]) {
         _checkOpen();
         final asset = await rootBundle.load('assets/$name');
@@ -197,6 +204,7 @@ class RemoteBackend {
       _checkEpoch(epoch);
       // Publish readiness only after every upload has succeeded.
       _work = created;
+      _emit('[SSH] Server helpers uploaded and ready.');
     } catch (_) {
       await _removeWork(created);
       rethrow;
@@ -217,6 +225,7 @@ class RemoteBackend {
       throw ArgumentError('Invalid server action or parameters.');
     }
     final epoch = _epoch;
+    _emit('[ACTION] Starting $action.');
     await prepare();
     _checkEpoch(epoch);
     final session = await _execute('${_prefix}bash $_work/remote.sh $action');
@@ -246,13 +255,18 @@ class RemoteBackend {
         ).transform(utf8.decoder).transform(const LineSplitter()).forEach((
           line,
         ) {
-          if (line.startsWith('ERROR: ')) {
-            final reason = line.substring(7).trim();
+          final clean = line.replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '');
+          // Preserve the specific Python reason over the Bash error-trap
+          // summary which follows it. Neither includes stdin parameters.
+          if (clean.startsWith('ERROR: ')) {
+            final reason = clean.substring(7).trim();
             if (reason.isNotEmpty) {
               remoteError = reason.length > 500
                   ? 'The server reported an error. Check the activity details.'
                   : reason;
             }
+          } else if (remoteError == null && clean.startsWith('[ERROR] ')) {
+            remoteError = clean.substring(8).trim();
           }
           _emit(line);
         }),
@@ -267,8 +281,15 @@ class RemoteBackend {
       ], eagerError: true);
       _checkEpoch(epoch);
       if (session.exitCode != 0) {
-        throw StateError(remoteError ?? 'Server action $action failed.');
+        _emit(
+          '[ACTION] $action failed (exit code ${session.exitCode ?? 'unknown'}).',
+        );
+        throw StateError(
+          remoteError ??
+              'Server action $action failed (exit code ${session.exitCode ?? 'unknown'}). Open Server activity for details.',
+        );
       }
+      _emit('[ACTION] Completed $action.');
       return result;
     } finally {
       _sessions.remove(session);
@@ -280,7 +301,7 @@ class RemoteBackend {
     if (!connection.client.isClosed) {
       try {
         final session = await _execute(
-          'rm -f $path/remote.sh $path/clients.py $path/amnezia_clients.py $path/amneziawg-install.sh $path/awg_setup.py $path/vless_manager.py $path/security_manager.py $path/firewall_policy.py; rmdir $path',
+          'rm -f $path/remote.sh $path/clients.py $path/amnezia_clients.py $path/amneziawg-install.sh $path/awg_setup.py $path/amnezia_setup.py $path/vless_manager.py $path/security_manager.py $path/firewall_policy.py $path/lifecycle.py $path/docker_setup.py; rmdir $path',
           cleanup: true,
         );
         try {

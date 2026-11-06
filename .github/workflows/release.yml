@@ -3,12 +3,12 @@ name: Verify and release
 on:
   push:
     branches: [main]
-    tags: [v0.0.11]
+    tags: [v0.0.12]
   pull_request:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish each v0.0.11 target as soon as it passes
+        description: Publish each v0.0.12 target as soon as it passes
         type: boolean
         default: false
 
@@ -37,7 +37,7 @@ jobs:
         run: |
           python3 tool/check_secrets.py
           mkdir release-source
-          git archive --format=zip --prefix=Ashapp-0.0.11/ --output=release-source/Ashapp-v0.0.11-source.zip "$GITHUB_SHA"
+          git archive --format=zip --prefix=Ashapp-0.0.12/ --output=release-source/Ashapp-v0.0.12-source.zip "$GITHUB_SHA"
       - uses: actions/attest@4d7d407517fe0a9f57ab8ca277dfd2efb1188c7f
         if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main' && !github.event.repository.private
         with:
@@ -48,16 +48,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           marker="<!-- ashapp-release-run:${GITHUB_RUN_ID}:${GITHUB_SHA} -->"
-          if gh release view v0.0.11 --json body --jq .body > existing-notes.txt 2>/dev/null; then
+          if gh release view v0.0.12 --json body --jq .body > existing-notes.txt 2>/dev/null; then
             grep -Fxq "$marker" existing-notes.txt
-            test "$(gh api repos/${{ github.repository }}/git/ref/tags/v0.0.11 --jq .object.sha)" = "$GITHUB_SHA"
+            test "$(gh api repos/${{ github.repository }}/git/ref/tags/v0.0.12 --jq .object.sha)" = "$GITHUB_SHA"
           else
-            test -z "$(git tag -l v0.0.11)"
+            test -z "$(git tag -l v0.0.12)"
             cat docs/RELEASE_NOTES.md > release-notes.txt
             printf '\n%s\n' "$marker" >> release-notes.txt
-            gh release create v0.0.11 --target "$GITHUB_SHA" --title "Ashapp v0.0.11" --notes-file release-notes.txt --latest
+            gh release create v0.0.12 --target "$GITHUB_SHA" --title "Ashapp v0.0.12" --notes-file release-notes.txt --latest
           fi
-          python tool/upload_release_assets.py v0.0.11 release-source/*
+          python tool/upload_release_assets.py v0.0.12 release-source/*
 
   native:
     needs: release-start
@@ -110,6 +110,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          rm release-output/Ashapp-v0.0.11-*-SHA256SUMS
+          rm release-output/Ashapp-v0.0.12-*-SHA256SUMS
           python tool/prepare_release.py release-output
-          python tool/upload_release_assets.py v0.0.11 release-output/SHA256SUMS
+          python tool/upload_release_assets.py v0.0.12 release-output/SHA256SUMS

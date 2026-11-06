@@ -7,6 +7,7 @@ import ipaddress
 import importlib.util
 import json
 import os
+import platform
 import re
 import socket
 import subprocess
@@ -14,11 +15,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 AWG_DIR = Path("/etc/amnezia/amneziawg")
 CLIENTS_DIR = Path("/var/lib/ashapp/clients")
 SOCKS_NAME = "amnezia-socks5proxy"
 SOCKS_CONFIG = "/usr/local/3proxy/conf/3proxy.cfg"
+SHARED_AWG_STATE = Path('/var/lib/ashapp/amnezia-awg2/deployment.json')
 CLIENT_RE = re.compile(r"[A-Za-z0-9_-]{1,15}\Z", re.ASCII)
 IFACE_RE = re.compile(r"[A-Za-z0-9_]{1,15}\Z", re.ASCII)
 AMNEZIA_AWG = {
@@ -175,7 +178,7 @@ def amnezia_containers():
     for name in proc.stdout.splitlines():
         if name not in AMNEZIA_AWG:
             continue
-        state = run(['docker', 'inspect', '--format', '{{json .State}}', name], check=False)
+        state = run(['docker', 'inspect', '--type', 'container', '--format', '{{json .State}}', name], check=False)
         try:
             value = json.loads(state.stdout) if state.returncode == 0 else None
             if not isinstance(value, dict) or not isinstance(value.get('Running'), bool):
@@ -184,8 +187,53 @@ def amnezia_containers():
             raise RuntimeError('An AmneziaVPN container could not be inspected. Refresh before making changes.') from None
         iface, tool = AMNEZIA_AWG[name]
         found.append({'source': name, 'running': value['Running'],
-                      'interface': iface, 'tool': tool})
+                      'interface': iface, 'tool': tool, 'protocol': 'amneziawg',
+                      'manager': 'AmneziaVPN', 'owned': False})
     return found
+
+
+def external_awg_details(container):
+    """Describe the protocol and data plane without adopting an external service."""
+    result = dict(container, protocol='amneziawg', manager='AmneziaVPN', owned=False,
+                  kernel=False, userspace=False, data_plane='unknown')
+    if not container['running']:
+        return result
+    source, iface = container['source'], container['interface']
+    try:
+        config = run(['docker', 'exec', source, 'cat', '/opt/amnezia/awg/' + iface + '.conf'], check=False)
+        if config.returncode:
+            raise ValueError()
+        cfg = interface_values(config.stdout)
+        result['port'] = container_manager(source).public_port(cfg)
+        if any(cfg.get(key) for key in ('HeaderProtectionKey', 'ContentPaddingAddition',
+                                      'RekeyAfterTime', 'RekeyTimeout', 'RejectAfterTime',
+                                      'KeepaliveTimeout', 'MaxHandshakeAttempts')) or any(
+                cfg.get(key, '').strip() and cfg[key].strip().lower() != 'off'
+                for key in ('RandomTrailers', 'DisableCookies')):
+            result['protocol_version'] = '3.1'
+        elif any(cfg.get(key) for key in ('S3', 'S4')) or any('-' in cfg.get(key, '') for key in ('H1', 'H2', 'H3', 'H4')):
+            result['protocol_version'] = '2'
+        elif any(cfg.get(key) for key in ('I1', 'I2', 'I3', 'I4', 'I5')):
+            result['protocol_version'] = '1.5'
+        else:
+            result['protocol_version'] = 'legacy'
+        link = run(['docker', 'exec', source, 'ip', '-d', '-j', 'link', 'show', 'dev', iface], check=False)
+        processes = run(['docker', 'top', source, '-eo', 'pid,comm'], check=False)
+        rows = [line.split(None, 1) for line in processes.stdout.splitlines()]
+        commands = [parts[1].strip() for parts in rows if len(parts) == 2 and parts[0].isdecimal()]
+        if link.returncode or processes.returncode or not commands:
+            raise ValueError()
+        links = json.loads(link.stdout)
+        result['userspace'] = 'amneziawg-go' in commands
+        result['kernel'] = (isinstance(links, list)
+                            and any(isinstance(value, dict) and isinstance(value.get('linkinfo'), dict)
+                                    and value['linkinfo'].get('info_kind') == 'amneziawg'
+                                    and 'UP' in value.get('flags', []) for value in links)
+                            and not result['userspace'])
+        result['data_plane'] = 'userspace' if result['userspace'] else 'kernel' if result['kernel'] else 'unknown'
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+        result['error'] = 'The external AmneziaWG configuration or active data plane could not be verified.'
+    return result
 
 
 def configured_peers(text):
@@ -229,6 +277,28 @@ def vless_manager():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.VlessManager()
+
+
+def shared_awg_manager():
+    spec = importlib.util.spec_from_file_location('ashapp_shared_awg', Path(__file__).with_name('amnezia_setup.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def shared_awg_backend():
+    # Use the current command/file functions, including injected fixture ones.
+    return SimpleNamespace(**globals())
+
+
+def shared_awg_status():
+    if not SHARED_AWG_STATE.exists() and not SHARED_AWG_STATE.is_symlink():
+        return {'configured': False}
+    try:
+        return shared_awg_manager().shared_status(shared_awg_backend())
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return {'configured': True, 'running': False, 'kernel': False,
+                'guard_intact': False, 'error': 'The shared VPN deployment could not be verified. Inspect it before changing services.'}
 
 
 def live_peers(command):
@@ -279,7 +349,11 @@ def peer_rows(text, live, names, source, stats_available, managed=None, revoke_a
 
 def status():
     result = {"awg": False, "kernel": False, "userspace": False, "socks5": False}
-    result.update(vless_manager().status())
+    result['architecture'] = platform.machine()
+    try:
+        result.update(vless_manager().status())
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        result.update(vless=False, vless_error='The VLESS service status could not be read.')
     result["awg_configured"] = (AWG_DIR / "params").exists() or any(AWG_DIR.glob("*.conf"))
     result['awg_host_configured'] = result['awg_configured']
     result["userspace"] = run(["pgrep", "-x", "amneziawg-go"], check=False).returncode == 0
@@ -294,38 +368,70 @@ def status():
         except (OSError, ValueError, KeyError, RuntimeError):
             result['awg_error'] = 'Existing VPN configuration could not be read. Repair it before changing clients.'
     try:
-        result['external_awg'] = amnezia_containers()
+        result['external_awg'] = [external_awg_details(container) for container in amnezia_containers()]
         if result['external_awg']:
             result['awg_configured'] = True
     except RuntimeError as error:
         result['vpn_detection_error'] = str(error)
+    shared = shared_awg_status()
+    if shared.get('configured'):
+        result.update({'awg_deployment': 'amnezia', 'awg_configured': True,
+                       'awg_shared_guard': shared.get('guard_intact') is True,
+                       'awg_owned': shared.get('guard_intact') is True and not shared.get('error'),
+                       'awg_source': 'amnezia-awg2'})
+        if result['awg_host_configured']:
+            result['awg_error'] = 'Conflicting host and shared VPN deployments require manual review.'
+            result['kernel'] = False
+        else:
+            result['awg'] = shared.get('running') is True
+            result['kernel'] = (shared.get('kernel') is True and shared.get('guard_intact') is True
+                                and not shared.get('userspace') and not shared.get('error'))
+            result['userspace'] = result['userspace'] or shared.get('userspace') is True
+            if isinstance(shared.get('port'), int):
+                result['awg_port'] = shared['port']
+            if shared.get('error'):
+                result['awg_error'] = shared['error']
     if run(["sh", "-c", "command -v docker >/dev/null"], check=False).returncode == 0:
         for name, field, target in ((SOCKS_NAME, "socks5", None),):
-            proc = run(["docker", "inspect", name], check=False)
+            proc = run(["docker", "inspect", "--type", "container", name], check=False)
             if proc.returncode == 0:
-                obj = json.loads(proc.stdout)[0]
-                result[field] = bool(obj["State"]["Running"])
                 result[field + '_configured'] = True
-                for key, bindings in socks_publications(obj).items():
-                    if bindings and (target is None or key == target):
-                        result[field + "_port"] = int(bindings[0]["HostPort"])
-                        result[field + '_access'] = 'private' if all(
-                            ipaddress.ip_address(binding.get('HostIp') or '0.0.0.0').is_loopback
-                            for binding in bindings) else 'public'
-                        if result[field + '_access'] == 'private':
-                            try:
-                                require_private_socks_engine()
-                                result['socks5_private_supported'] = True
-                            except RuntimeError as error:
-                                result['socks5_private_supported'] = False
-                                result['socks5_access_warning'] = str(error)
-                        break
+                try:
+                    values = json.loads(proc.stdout)
+                    if not isinstance(values, list) or len(values) != 1:
+                        raise ValueError()
+                    obj = values[0]
+                    if not isinstance(obj['State']['Running'], bool):
+                        raise ValueError()
+                    result[field] = obj['State']['Running']
+                    labels = (obj.get('Config') or {}).get('Labels') or {}
+                    result['socks5_owned'] = labels.get('io.ashapp.managed') == 'socks5-v1'
+                    bindings = [binding for key, entries in socks_publications(obj).items()
+                                if key.endswith('/tcp') for binding in entries or []]
+                    ports = {int(binding['HostPort']) for binding in bindings}
+                    if len(ports) != 1 or not 1 <= next(iter(ports)) <= 65535:
+                        raise ValueError()
+                    result[field + '_port'] = next(iter(ports))
+                    result[field + '_access'] = 'private' if all(
+                        ipaddress.ip_address(binding.get('HostIp') or '0.0.0.0').is_loopback
+                        for binding in bindings) else 'public'
+                    if result[field + '_access'] == 'private':
+                        try:
+                            require_private_socks_engine()
+                            result['socks5_private_supported'] = True
+                        except RuntimeError as error:
+                            result['socks5_private_supported'] = False
+                            result['socks5_access_warning'] = str(error)
+                except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+                    result['socks5_error'] = 'The SOCKS5 container or published port could not be inspected. Other server services are still shown.'
     icmp = run(["iptables", "-C", "INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-j", "DROP"], check=False)
     owned_icmp = run(["iptables", "-C", "INPUT", "-p", "icmp", "--icmp-type", "echo-request", "-m", "comment", "--comment", "ashapp-owned-icmp-v1", "-j", "DROP"], check=False)
     result["icmp_blocked"] = icmp.returncode == 0 or owned_icmp.returncode == 0
     proc = run(["/usr/sbin/sshd", "-T"], check=False)
     result["ssh"] = dict(line.split(None, 1) for line in proc.stdout.splitlines()
                          if line.startswith(("permitrootlogin ", "passwordauthentication ")))
+    if proc.returncode or len(result['ssh']) != 2:
+        result['ssh_error'] = 'The SSH daemon policy could not be inspected. Validate sshd configuration and its runtime service before changing access.'
     result["reboot_required"] = Path("/var/run/reboot-required").exists()
     return result
 
@@ -392,6 +498,7 @@ def list_clients():
                                   source, available)
         manager = container_manager(source)
         for row in external_rows:
+            row['name_key'] = row['name'].casefold()
             row['can_revoke'] = config.returncode == 0 and available and row['configured']
             row['can_rename'] = config.returncode == 0 and row['configured']
             row['can_import'] = config.returncode == 0 and row['configured']
@@ -557,6 +664,12 @@ def client_action(action, fields):
     if source == 'vless-reality':
         return vless_manager().action(action, fields)
     if source in AMNEZIA_AWG:
+        if action == 'add-client' and source == 'amnezia-awg2':
+            shared = shared_awg_status()
+            if shared.get('configured') and (not all(shared.get(key) is True
+                    for key in ('running', 'kernel', 'guard_intact'))
+                    or shared.get('userspace') or shared.get('error')):
+                raise RuntimeError('The shared kernel VPN must pass its safety checks before creating clients.')
         manager = container_manager(source)
         if action == 'add-client' and len(fields) == 4:
             return manager.add(name, fields[2], fields[3])
@@ -666,12 +779,15 @@ def socks_info():
     port = re.search(r"(?m)^socks -p([0-9]+)\s*$", proc.stdout)
     if not match or not port:
         raise RuntimeError("The SOCKS5 configuration format is unsupported.")
-    inspected = json.loads(run(['docker', 'inspect', SOCKS_NAME]).stdout)[0]
+    inspected = json.loads(run(['docker', 'inspect', '--type', 'container', SOCKS_NAME]).stdout)[0]
     bindings = socks_publications(inspected).get(port.group(1) + '/tcp') or []
-    private = bool(bindings) and all(ipaddress.ip_address(item.get('HostIp') or '0.0.0.0').is_loopback for item in bindings)
+    ports = {int(item['HostPort']) for item in bindings}
+    if len(ports) != 1 or not 1 <= next(iter(ports)) <= 65535:
+        raise RuntimeError('The public SOCKS5 port is missing or ambiguous.')
+    private = all(ipaddress.ip_address(item.get('HostIp') or '0.0.0.0').is_loopback for item in bindings)
     if private:
         require_private_socks_engine()
-    return {"user": match.group(1), "password": match.group(2), "port": int(port.group(1)),
+    return {"user": match.group(1), "password": match.group(2), "port": next(iter(ports)),
             'access': 'private' if private else 'public'}
 
 
@@ -715,6 +831,10 @@ def service_control(kind, operation):
     if operation not in ('start', 'stop', 'restart'):
         raise ValueError('Invalid service operation.')
     if kind == 'awg':
+        if shared_awg_status().get('configured'):
+            if (AWG_DIR / 'params').exists() or any(AWG_DIR.glob('*.conf')):
+                raise ValueError('Conflicting host and shared VPN deployments require manual review.')
+            return shared_awg_manager().control(shared_awg_backend(), operation)
         params, iface, path, text = settings()
         if run(['pgrep', '-x', 'amneziawg-go'], check=False).returncode == 0:
             raise ValueError('Refusing to manage a userspace VPN.')
@@ -723,7 +843,7 @@ def service_control(kind, operation):
             raise ValueError('The VPN did not start as a kernel interface.')
     elif kind == 'socks':
         if operation != 'stop':
-            inspected = json.loads(run(['docker', 'inspect', SOCKS_NAME]).stdout)[0]
+            inspected = json.loads(run(['docker', 'inspect', '--type', 'container', SOCKS_NAME]).stdout)[0]
             if any(ipaddress.ip_address(item.get('HostIp') or '0.0.0.0').is_loopback
                    for bindings in socks_publications(inspected).values() for item in bindings or []):
                 require_private_socks_engine()

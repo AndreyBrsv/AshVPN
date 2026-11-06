@@ -68,6 +68,7 @@ class _ImportClientDialogState extends State<ImportClientDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
     title: Text('Import existing access · ${widget.name}'),
     content: SizedBox(
       width: 560,

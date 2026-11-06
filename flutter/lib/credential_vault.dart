@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'connection_details.dart';
 import 'setup_secrets.dart';
+import 'provisioning_state.dart';
 
 abstract interface class SecretStore {
   Future<String?> read(String key);
@@ -117,6 +118,18 @@ class CredentialVault {
 
   Future<void> forgetConnection(String host, int port) =>
       store.delete(_key('ssh', _endpoint(host, port)));
+  Future<void> saveSetup(String host, int port, ProvisioningDraft draft) =>
+      store.write(
+        _key('setup', _endpoint(host, port)),
+        jsonEncode(draft.toVault()),
+      );
+  Future<ProvisioningDraft?> setup(String host, int port) async {
+    final raw = await store.read(_key('setup', _endpoint(host, port)));
+    return raw == null ? null : ProvisioningDraft.fromVault(jsonDecode(raw));
+  }
+
+  Future<void> forgetSetup(String host, int port) =>
+      store.delete(_key('setup', _endpoint(host, port)));
   Future<void> saveTemplate(String name, SetupSecrets secrets) =>
       store.write(_key('template', name), jsonEncode(secrets.toVault()));
   Future<SetupSecrets> template(String name) async {

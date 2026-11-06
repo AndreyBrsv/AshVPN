@@ -12,6 +12,31 @@ BASH = 'C:/Program Files/Git/bin/bash.exe' if Path('C:/Program Files/Git/bin/bas
 
 @unittest.skipUnless(BASH, 'Bash is required')
 class AccountIcmpTests(unittest.TestCase):
+    def test_password_commit_markers_surround_only_the_successful_write(self):
+        for action, start, end, payload, identity in (
+                ('create_user', 'create_user() {', '\nssh_config() {', 'testadmin\0placeholder_password\0', 'administrator'),
+                ('root_password', 'root_password() {', '\ncreate_user() {', 'placeholder_password\0', 'root-password')):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as folder:
+                body = SOURCE[SOURCE.index(start):SOURCE.index(end)]
+                script = '''set -e
+BASE_DIR=/unused-test-helpers
+header() { :; }
+field() { IFS= read -r -d '' "$1"; }
+username_ok() { return 0; }
+id() { printf '1001\\n'; }
+fatal() { exit 99; }
+ok() { :; }
+usermod() { :; }
+visudo() { :; }
+install() { :; }
+python3() { printf 'MARKER:%s:%s\\n' "$3" "$4"; }
+chpasswd() { cat >/dev/null; printf 'PASSWORD_COMMITTED\\n'; }
+''' + body.replace('/etc/sudoers.d', Path(folder).as_posix()) + '\n' + action + '\n'
+                result = subprocess.run([BASH, '-c', script], input=payload, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [f'MARKER:{identity}:started', 'PASSWORD_COMMITTED', f'MARKER:{identity}:committed'])
+                self.assertNotIn('placeholder_password', result.stdout + result.stderr)
+
     def test_account_preparation_failures_do_not_commit_new_password(self):
         body = SOURCE[SOURCE.index('create_user() {'):SOURCE.index('\nssh_config() {')]
         for failing in ('usermod', 'visudo'):

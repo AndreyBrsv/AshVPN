@@ -145,9 +145,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ inputs.target }}
         run: |
-          test "$(gh api repos/${{ github.repository }}/git/ref/tags/v0.0.11 --jq .object.sha)" = "$GITHUB_SHA"
-          sums="release-output/Ashapp-v0.0.11-${TARGET}-SHA256SUMS"
+          test "$(gh api repos/${{ github.repository }}/git/ref/tags/v0.0.12 --jq .object.sha)" = "$GITHUB_SHA"
+          sums="release-output/Ashapp-v0.0.12-${TARGET}-SHA256SUMS"
           for file in release-output/*; do
-            if [ "$file" != "$sums" ]; then python3 tool/upload_release_assets.py v0.0.11 "$file"; fi
+            if [ "$file" != "$sums" ]; then python3 tool/upload_release_assets.py v0.0.12 "$file"; fi
           done
-          python3 tool/upload_release_assets.py v0.0.11 "$sums"
+          python3 tool/upload_release_assets.py v0.0.12 "$sums"

@@ -19,6 +19,30 @@ spec.loader.exec_module(clients)
 
 
 class ClientTests(unittest.TestCase):
+    def test_same_named_docker_image_does_not_break_server_status(self):
+        from unittest.mock import Mock
+        calls = []
+
+        def commands(args, data=None, check=True):
+            calls.append(args)
+            if args[:2] == ['docker', 'inspect']:
+                typed = args[2:4] == ['--type', 'container']
+                return subprocess.CompletedProcess(args, 1 if typed else 0,
+                                                   '' if typed else json.dumps([{'Id': 'image-fixture'}]), '')
+            if args[:2] == ['sh', '-c']:
+                return subprocess.CompletedProcess(args, 0, '', '')
+            return subprocess.CompletedProcess(args, 1, '', '')
+
+        self.run.side_effect = commands
+        manager = Mock()
+        manager.status.return_value = {'vless': False, 'vless_configured': False}
+        with patch.object(clients, 'vless_manager', return_value=manager), \
+                patch.object(clients, 'amnezia_containers', return_value=[]):
+            result = clients.status()
+        self.assertFalse(result['socks5'])
+        self.assertNotIn('socks5_configured', result)
+        self.assertIn(['docker', 'inspect', '--type', 'container', clients.SOCKS_NAME], calls)
+
     def test_private_socks_requires_supported_stable_daemon_not_client_version(self):
         allowed = ('28.0.0', '29.1.2', '28.2.2-0ubuntu1~24.04.1', '28.0.1+dfsg1', '28.0.1+azure-1')
         refused = ('27.5.1', '20.10.24', '', 'unknown', '28.0', '28.0.0-rc.1', '29.0.0-beta1',

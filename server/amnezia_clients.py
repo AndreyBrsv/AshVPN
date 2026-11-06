@@ -306,7 +306,7 @@ class ContainerClients:
         mapped = self.run(['docker', 'port', self.source, f'{port}/udp'], check=False)
         ports = {int(line.rsplit(':', 1)[1]) for line in mapped.stdout.splitlines() if ':' in line}
         if not ports:
-            mode = self.run(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}}', self.source]).stdout.strip()
+            mode = self.run(['docker', 'inspect', '--type', 'container', '--format', '{{.HostConfig.NetworkMode}}', self.source]).stdout.strip()
             if mode != 'host':
                 raise RuntimeError('The public UDP port could not be determined.')
             ports = {port}
@@ -328,14 +328,21 @@ class ContainerClients:
         chosen = []
         for server in servers:
             used = {s.ip for s in servers}
-            for offset in range(1, min(server.network.num_addresses - 1, 65535)):
+            # Official AmneziaVPN allocates from the final saved peer address.
+            # Appending a reused lower hole makes its next client collide with
+            # a higher existing peer. Keep new addresses monotonic in the
+            # shared configuration while also reserving runtime-only routes.
+            last = max([int(server.ip)] + [int(route.broadcast_address) for route in reserved
+                        if route.version == server.version and route.overlaps(server.network)])
+            first = max(1, last - int(server.network.network_address) + 1)
+            for offset in range(first, min(server.network.num_addresses - 1, 65535)):
                 ip = server.network.network_address + offset
                 if ip not in used and not any(ip in route for route in reserved):
                     chosen.append(str(ip) + ('/32' if ip.version == 4 else '/128'))
                     reserved.append(ipaddress.ip_network(chosen[-1]))
                     break
             else:
-                raise RuntimeError('No addresses remain in the VPN subnet.')
+                raise RuntimeError('No addresses remain after the existing peers. Reusing earlier addresses is unsafe with AmneziaVPN management.')
         private = self.run(self.prefix + [self.tool, 'genkey']).stdout.strip()
         public = self.run(self.prefix + [self.tool, 'pubkey'], private + '\n').stdout.strip()
         server_public = self.run(self.prefix + [self.tool, 'pubkey'], cfg['PrivateKey'] + '\n').stdout.strip()

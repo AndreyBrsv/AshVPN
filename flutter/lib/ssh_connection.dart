@@ -53,13 +53,33 @@ class SshConnection {
       port,
       timeout: const Duration(seconds: 15),
     );
+    Object? hostVerificationFailure;
     final client = SSHClient(
       socket,
       username: username,
       identities: identities,
       onPasswordRequest: privateKey.isEmpty ? () => password : null,
       onVerifyHostKey: (type, fingerprint) async {
-        return known.verify(key, type, utf8.decode(fingerprint), confirmHost);
+        try {
+          final accepted = await known.verify(
+            key,
+            type,
+            utf8.decode(fingerprint),
+            confirmHost,
+            onChanged: (change) => hostVerificationFailure = change,
+          );
+          if (!accepted) {
+            hostVerificationFailure ??= SSHHostkeyError(
+              'Server key was not trusted.',
+            );
+          }
+          return accepted;
+        } catch (error) {
+          hostVerificationFailure = StateError(
+            'Could not verify the saved SSH server key (${error.runtimeType}).',
+          );
+          return false;
+        }
       },
     );
     try {
@@ -67,6 +87,7 @@ class SshConnection {
       return SshConnection.fromClient(client);
     } catch (_) {
       client.close();
+      if (hostVerificationFailure != null) throw hostVerificationFailure!;
       rethrow;
     }
   }

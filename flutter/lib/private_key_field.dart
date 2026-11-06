@@ -38,32 +38,46 @@ class PrivateKeyField extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => TextField(
-    controller: controller,
-    enabled: enabled,
-    readOnly: true,
-    obscureText: true,
-    autocorrect: false,
-    enableSuggestions: false,
-    enableInteractiveSelection: false,
-    decoration: InputDecoration(
-      labelText: label,
-      helperText: 'Use Paste to preserve the original key format.',
-      suffixIcon: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton(
-            tooltip: 'Paste SSH private key',
-            onPressed: enabled ? () => _paste(context) : null,
-            icon: const Icon(Icons.content_paste),
-          ),
-          IconButton(
-            tooltip: 'Clear SSH private key',
-            onPressed: enabled ? controller.clear : null,
-            icon: const Icon(Icons.clear),
-          ),
-        ],
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      ExcludeSemantics(
+        child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
       ),
-    ),
+      const SizedBox(height: 8),
+      Semantics(
+        label: label,
+        child: TextField(
+          controller: controller,
+          enabled: enabled,
+          readOnly: true,
+          obscureText: true,
+          autocorrect: false,
+          enableSuggestions: false,
+          enableInteractiveSelection: false,
+          decoration: InputDecoration(
+            helperText: 'Use Paste to preserve the original key format.',
+            helperMaxLines: 8,
+            suffixIcon: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Paste SSH private key',
+                  style: IconButton.styleFrom(minimumSize: const Size(48, 48)),
+                  onPressed: enabled ? () => _paste(context) : null,
+                  icon: const Icon(Icons.content_paste),
+                ),
+                IconButton(
+                  tooltip: 'Clear SSH private key',
+                  style: IconButton.styleFrom(minimumSize: const Size(48, 48)),
+                  onPressed: enabled ? controller.clear : null,
+                  icon: const Icon(Icons.clear),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ],
   );
 }

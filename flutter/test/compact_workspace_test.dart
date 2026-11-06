@@ -1,3 +1,4 @@
+import 'package:ashapp/amnezia_connection.dart';
 import 'package:ashapp/connection_details.dart';
 import 'package:ashapp/main.dart';
 import 'package:ashapp/server_template.dart';
@@ -152,7 +153,13 @@ void main() {
   ) async {
     final h = Harness();
     addTearDown(h.vm.dispose);
-    h.server.configuration = 'private-client-test-placeholder';
+    const original =
+        '[Interface]\n'
+        'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n'
+        'Address = 10.8.0.2/32\nDNS = 1.1.1.1\n'
+        '[Peer]\nPublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\n'
+        'AllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:585\n';
+    h.server.configuration = original;
     h.server.clientRows = [
       {
         'name': 'Phone',
@@ -182,10 +189,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Clients'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byTooltip('Copy connection'));
-    await tester.tap(find.byTooltip('Copy connection'));
+    await tester.ensureVisible(find.byTooltip('Copy Amnezia link'));
+    await tester.tap(find.byTooltip('Copy Amnezia link'));
     await tester.pumpAndSettle();
-    expect(copied, 'private-client-test-placeholder');
+    expect(copied, AmneziaConnection.fromConfig('Phone', original).link);
     expect(
       find.textContaining('private-client-test-placeholder'),
       findsNothing,

@@ -18,6 +18,18 @@ class SetupSecrets {
   final String adminName, adminPassword, socksUser, socksPassword, sshPublicKey;
   final String sshPrivateKey, sshKeyPassphrase;
 
+  /// Returns reusable server answers without credentials for logging in to a VPS.
+  SetupSecrets forTemplate() => SetupSecrets(
+    rootPassword: rootPassword,
+    adminName: adminName,
+    adminPassword: adminPassword,
+    socksUser: socksUser,
+    socksPassword: socksPassword,
+    sshPublicKey: sshPublicKey,
+    sshPrivateKey: sshPrivateKey,
+    sshKeyPassphrase: sshKeyPassphrase,
+  );
+
   Map<String, String> toVault() => {
     'connection_user': connectionUser,
     'connection_password': connectionPassword,
@@ -48,10 +60,16 @@ class SetupSecrets {
     );
   }
 
-  String? validate(ServerTemplate answers, {String? activeUser}) {
+  String? validate(
+    ServerTemplate answers, {
+    String? activeUser,
+    bool activeUsesKey = false,
+    bool existingSocks = false,
+  }) {
     if (answers.disablePasswordLogin &&
         !answers.generateSshKey &&
-        sshPrivateKey.isEmpty) {
+        sshPrivateKey.isEmpty &&
+        !activeUsesKey) {
       return 'Generate or import an SSH private key before disabling password login.';
     }
     if (answers.installVless &&
@@ -76,6 +94,7 @@ class SetupSecrets {
       return 'Create an administrator before disabling root SSH login.';
     }
     if (answers.installSocks &&
+        !existingSocks &&
         (!RegExp(r'^[A-Za-z0-9_]{1,128}$').hasMatch(socksUser) ||
             !RegExp(r'^[A-Za-z0-9_]{8,128}$').hasMatch(socksPassword))) {
       return 'SOCKS5 needs a username and an 8–128 character password using letters, numbers or underscores.';

@@ -90,7 +90,8 @@ void main() {
       expect(
         h.server.calls.any(
           (c) =>
-              c.$1 == 'security-stage' && c.$2[0].contains('"firewall":true'),
+              {'security-stage', 'security-setup'}.contains(c.$1) &&
+              c.$2[0].contains('"firewall":true'),
         ),
         isTrue,
       );
@@ -108,7 +109,12 @@ void main() {
       await h.vm.applySecurity({'disable_passwords': true}, 'test-plan'),
       isFalse,
     );
-    expect(h.server.calls.where((c) => c.$1 == 'security-stage'), isEmpty);
+    expect(
+      h.server.calls.where(
+        (c) => {'security-stage', 'security-setup'}.contains(c.$1),
+      ),
+      isEmpty,
+    );
     h.store.fail = false;
     expect(
       await h.vm.applySecurity({'disable_passwords': true}, 'test-plan'),
@@ -140,7 +146,12 @@ void main() {
       await h.vm.applySecurity({'disable_passwords': true}, 'test-plan'),
       isFalse,
     );
-    expect(h.server.calls.where((c) => c.$1 == 'security-stage'), isEmpty);
+    expect(
+      h.server.calls.where(
+        (c) => {'security-stage', 'security-setup'}.contains(c.$1),
+      ),
+      isEmpty,
+    );
   });
 
   test(
@@ -293,7 +304,12 @@ void main() {
         isFalse,
       );
       expect((h.server.state['ssh'] as Map)['passwordauthentication'], 'yes');
-      expect(h.server.calls.where((c) => c.$1 == 'security-stage'), isEmpty);
+      expect(
+        h.server.calls.where(
+          (c) => {'security-stage', 'security-setup'}.contains(c.$1),
+        ),
+        isEmpty,
+      );
       expect(h.vm.ssh!.usesKey, isFalse);
       expect(h.vm.connected, isTrue);
     },
@@ -309,7 +325,12 @@ void main() {
         await h.vm.applySecurity({'disable_passwords': true}, 'test-plan'),
         isFalse,
       );
-      expect(h.server.calls.where((c) => c.$1 == 'security-stage'), isEmpty);
+      expect(
+        h.server.calls.where(
+          (c) => {'security-stage', 'security-setup'}.contains(c.$1),
+        ),
+        isEmpty,
+      );
     },
   );
 

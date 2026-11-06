@@ -1,7 +1,7 @@
 name: ashapp
 description: Ashapp desktop server setup application.
 publish_to: none
-version: 0.0.11+11
+version: 0.0.12+12
 environment:
   sdk: '>=3.13.0 <4.0.0'
 dependencies:
@@ -27,6 +27,9 @@ flutter:
     - assets/amnezia_clients.py
     - assets/amneziawg-install.sh
     - assets/awg_setup.py
+    - assets/amnezia_setup.py
     - assets/vless_manager.py
     - assets/security_manager.py
     - assets/firewall_policy.py
+    - assets/lifecycle.py
+    - assets/docker_setup.py

@@ -5,6 +5,7 @@ import 'package:ashapp/server_template.dart';
 import 'package:ashapp/setup_secrets.dart';
 import 'package:ashapp/ssh_identity.dart';
 import 'package:ashapp/workspace_controller.dart';
+import 'package:ashapp/private_key_field.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -48,11 +49,13 @@ void main() {
       );
       await tester.tap(find.text('Continue'));
       await tester.pumpAndSettle();
-      final input = find.byWidgetPredicate(
-        (widget) =>
-            widget is TextField &&
-            widget.decoration?.labelText ==
-                'SSH private key to install (optional)',
+      final input = find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) =>
+              widget is PrivateKeyField &&
+              widget.label == 'SSH private key to install (optional)',
+        ),
+        matching: find.byType(TextField),
       );
       expect(input, findsOneWidget);
       expect(tester.widget<TextField>(input).controller!.text == key, isTrue);
@@ -130,10 +133,13 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await render(tester, h.vm);
-    final input = find.byWidgetPredicate(
-      (widget) =>
-          widget is TextField &&
-          widget.decoration?.labelText == 'Import SSH private key (paste)',
+    final input = find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) =>
+            widget is PrivateKeyField &&
+            widget.label == 'Import SSH private key (paste)',
+      ),
+      matching: find.byType(TextField),
     );
     await tester.ensureVisible(input);
     final pem = SshIdentity.generate().privateKey;

@@ -51,6 +51,7 @@ class TestClient extends Fake implements SSHClient {
   bool configured = false;
   bool excessiveOutput = false;
   String? commandError;
+  String? rawError;
   Completer<void>? commandGate;
   Completer<void>? preparationGate;
   String? stalledCommand;
@@ -96,8 +97,8 @@ class TestClient extends Fake implements SSHClient {
     }
     final session = TestSession(
       gate: commandGate,
-      code: commandError == null ? 0 : 1,
-      error: commandError == null ? '' : 'ERROR: $commandError\n',
+      code: commandError == null && rawError == null ? 0 : 1,
+      error: rawError ?? (commandError == null ? '' : 'ERROR: $commandError\n'),
       text: excessiveOutput
           ? List.filled(8 * 1024 * 1024 + 1, 'x').join()
           : malformedOutput
@@ -111,6 +112,74 @@ class TestClient extends Fake implements SSHClient {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'activity identifies actions without logging their stdin fields',
+    () async {
+      final backend = RemoteBackend(
+        SshConnection.fromClient(TestClient()),
+        'root',
+      );
+      final lines = <String>[];
+      final subscription = backend.output.stream.listen(lines.add);
+      await backend.run('root-password', ['synthetic-password-placeholder']);
+      await Future<void>.delayed(Duration.zero);
+      expect(lines, contains('[ACTION] Starting root-password.'));
+      expect(lines, contains('[SSH] Server helpers uploaded and ready.'));
+      expect(lines, contains('[ACTION] Completed root-password.'));
+      expect(
+        lines.join('\n'),
+        isNot(contains('synthetic-password-placeholder')),
+      );
+      await subscription.cancel();
+      await backend.close();
+    },
+  );
+
+  test('specific Python error survives the coloured Bash failure summary', () async {
+    final client = TestClient()
+      ..rawError =
+          'ERROR: Both IPv4 and IPv6 firewall support are required.\n'
+          '\x1B[31m[ERROR]\x1B[0m Action security-preview, line 393, code 1.\n';
+    final backend = RemoteBackend(SshConnection.fromClient(client), 'root');
+    addTearDown(backend.close);
+    final lines = <String>[];
+    final subscription = backend.output.stream.listen(lines.add);
+    addTearDown(subscription.cancel);
+    await expectLater(
+      backend.run('security-preview', ['{}']),
+      throwsA(
+        isA<StateError>().having(
+          (e) => e.message,
+          'reason',
+          'Both IPv4 and IPv6 firewall support are required.',
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(lines, contains('[ACTION] security-preview failed (exit code 1).'));
+    expect(lines.join('\n'), isNot(contains('\x1B')));
+  });
+
+  test(
+    'Bash-only failure includes its action, line and exit information',
+    () async {
+      final client = TestClient()
+        ..rawError =
+            '\x1B[31m[ERROR]\x1B[0m Action upgrade, line 100, code 17.\n';
+      final backend = RemoteBackend(SshConnection.fromClient(client), 'root');
+      addTearDown(backend.close);
+      await expectLater(
+        backend.run('upgrade'),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'reason',
+            'Action upgrade, line 100, code 17.',
+          ),
+        ),
+      );
+    },
+  );
   for (final stage in [
     'sudo -n true',
     'umask 077; mktemp -d /tmp/ashapp.XXXXXXXXXX',
@@ -221,11 +290,16 @@ void main() {
         client.commands.where((s) => s.startsWith('rm -f /tmp/ashapp.test1')),
         hasLength(1),
       );
+      final cleanup = client.commands.singleWhere(
+        (s) => s.startsWith('rm -f /tmp/ashapp.test1'),
+      );
+      expect(cleanup, contains('/tmp/ashapp.test1/lifecycle.py'));
+      expect(cleanup, contains('/tmp/ashapp.test1/docker_setup.py'));
       expect(
         client.commands.where(
           (s) => s.startsWith('umask 077; cat > /tmp/ashapp.test2/'),
         ),
-        hasLength(8),
+        hasLength(11),
       );
     },
   );

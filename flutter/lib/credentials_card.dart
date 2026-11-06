@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'connection_details.dart';
+import 'ui_components.dart';
 
 class CredentialsCard extends StatefulWidget {
   const CredentialsCard({
@@ -38,6 +39,7 @@ class _CredentialsCardState extends State<CredentialsCard> {
           const SizedBox(height: 12),
           Wrap(
             spacing: 8,
+            runSpacing: 8,
             children: [
               if (widget.details.usesKey)
                 IconButton(
@@ -45,6 +47,16 @@ class _CredentialsCardState extends State<CredentialsCard> {
                   icon: const Icon(Icons.key_outlined),
                   onPressed: () => Clipboard.setData(
                     ClipboardData(text: widget.details.privateKey),
+                  ),
+                ),
+              if (!widget.details.usesKey)
+                IconButton(
+                  tooltip: 'Copy password',
+                  icon: const Icon(Icons.copy_outlined),
+                  onPressed: () => copyClientValue(
+                    context,
+                    widget.details.password,
+                    'Password copied. Keep it private.',
                   ),
                 ),
               if (!widget.details.usesKey)

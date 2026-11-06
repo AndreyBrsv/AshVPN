@@ -3,6 +3,8 @@ import 'vless_connection.dart';
 /// A reusable set of non-secret server provisioning choices.
 /// Credentials and generated VPN configurations must never be serialized here.
 class ServerTemplate {
+  static const defaultAwgDeployment = 'amnezia';
+
   factory ServerTemplate({
     required String name,
     required bool blockPing,
@@ -29,6 +31,7 @@ class ServerTemplate {
     bool disablePasswordLogin = false,
     bool generateSshKey = false,
     String socksAccess = 'public',
+    String awgDeployment = defaultAwgDeployment,
   }) => fromJson({
     'name': name,
     'block_ping': blockPing,
@@ -55,6 +58,7 @@ class ServerTemplate {
     'disable_password_login': disablePasswordLogin,
     'generate_ssh_key': generateSshKey,
     'socks_access': socksAccess,
+    'awg_deployment': awgDeployment,
   });
 
   const ServerTemplate._({
@@ -83,6 +87,7 @@ class ServerTemplate {
     required this.disablePasswordLogin,
     required this.generateSshKey,
     required this.socksAccess,
+    required this.awgDeployment,
   });
 
   final String name;
@@ -106,6 +111,7 @@ class ServerTemplate {
   final bool protectSsh, configureFirewall, automaticUpdates;
   final bool disablePasswordLogin, generateSshKey;
   final String socksAccess;
+  final String awgDeployment;
   ServerTemplate withCredentialsRef(String ref) =>
       fromJson({...toJson(), 'credentials_ref': ref});
 
@@ -135,6 +141,7 @@ class ServerTemplate {
     'disable_password_login': disablePasswordLogin,
     'generate_ssh_key': generateSshKey,
     'socks_access': socksAccess,
+    'awg_deployment': awgDeployment,
   };
 
   static ServerTemplate fromJson(Object? json) {
@@ -174,6 +181,12 @@ class ServerTemplate {
     final access = json['socks_access'] ?? 'public';
     if (access != 'public' && access != 'private') {
       throw const FormatException('Invalid SOCKS5 access mode.');
+    }
+    final deployment = json.containsKey('awg_deployment')
+        ? json['awg_deployment']
+        : 'host';
+    if (deployment != 'host' && deployment != 'amnezia') {
+      throw const FormatException('Invalid AmneziaWG deployment mode.');
     }
     if (installVless is! bool ||
         vlessPort is! int ||
@@ -260,6 +273,7 @@ class ServerTemplate {
       disablePasswordLogin: security['disable_password_login']!,
       generateSshKey: security['generate_ssh_key']!,
       socksAccess: access as String,
+      awgDeployment: deployment as String,
     );
   }
 

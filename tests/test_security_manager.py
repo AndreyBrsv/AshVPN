@@ -33,6 +33,8 @@ class SecurityTests(unittest.TestCase):
         for key, value in {'FILES': self.files, 'STATE': self.state, 'SSH_MAIN': self.main,
                            'HELPER': self.root / 'helper.py', 'PLUGIN': self.plugin,
                            'RECOVERY': self.root / 'recovery.service',
+                           'LEGACY_SSH': self.root / 'legacy-ssh.conf',
+                           'AWG_DIRECTORY': self.root / 'awg', 'VLESS_STATE': self.root / 'vless-state.json',
                            'DOCKER_DROPIN': self.root / 'docker-dropin.conf'}.items():
             context = patch.object(security, key, value)
             context.start(); self.addCleanup(context.stop)
@@ -103,6 +105,36 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(list(self.state.iterdir()), [])
         self.assertFalse(any('-A' in command or '-F' in command for command in self.commands))
 
+    def test_listener_interface_suffixes_preserve_dhcp_but_exclude_loopback(self):
+        def scoped_run(args, check=True, data=None):
+            if args[:3] == ['ss', '-H', '-lntu']:
+                return SimpleNamespace(returncode=0, stderr='', stdout=(
+                    'udp UNCONN 0 0 203.0.113.10%ens3:68 0.0.0.0:*\n'
+                    'udp UNCONN 0 0 [fe80::1%ens3]:546 [::]:*\n'
+                    'tcp LISTEN 0 128 127.0.0.53%lo:53 0.0.0.0:*\n'
+                    'tcp LISTEN 0 128 [::1%lo]:1080 [::]:*\n'))
+            return self.fake_run(args, check, data)
+
+        with patch.object(security, 'run', scoped_run):
+            self.assertEqual(security.listeners(), {'tcp': [], 'udp': [68, 546]})
+
+    def test_dhcp_rebinding_during_dependency_install_does_not_invalidate_review(self):
+        state = {'installed': False}
+
+        def rebind_run(args, check=True, data=None):
+            if args[0] == 'apt-get' and 'install' in args:
+                state['installed'] = True
+            if args[:3] == ['ss', '-H', '-lntu']:
+                host = '0.0.0.0' if state['installed'] else '203.0.113.10%ens3'
+                return SimpleNamespace(returncode=0, stderr='', stdout=f'udp UNCONN 0 0 {host}:68 0.0.0.0:*\n')
+            return self.fake_run(args, check, data)
+
+        with patch.object(security, 'run', rebind_run):
+            before = security.preview({'fail2ban': True})
+            self.assertEqual(before['ports']['udp'], [68])
+            staged = security.stage({'fail2ban': True}, before['digest'])
+            self.assertTrue(self.confirm(staged['token'])['confirmed'])
+
     def test_rejects_unknown_or_non_boolean_switches(self):
         for changes in ({}, {'firewall': 1}, {'command': 'whoami'}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -127,6 +159,21 @@ class SecurityTests(unittest.TestCase):
         self.files['firewall'].write_text('external')
         with self.assertRaisesRegex(ValueError, 'unrecognized'):
             security.preview({'firewall': True})
+
+    def test_dependency_drift_reports_only_changed_categories_and_preserves_guard(self):
+        plan = security.preview({'fail2ban': True})
+
+        def changing_run(args, check=True, data=None):
+            if args[0] == 'apt-get' and 'install' in args:
+                self.main.write_text('Port 2222\n# external-change-fixture\n')
+            return self.fake_run(args, check, data)
+
+        with patch.object(security, 'run', changing_run):
+            with self.assertRaisesRegex(ValueError, r'dependencies \(files\)') as failure:
+                security.stage({'fail2ban': True}, plan['digest'])
+        self.assertNotIn('external-change-fixture', str(failure.exception))
+        self.assertFalse(security.HELPER.exists())
+        self.assertFalse((self.state / 'pending.json').exists())
 
     def test_ssh_policy_can_only_be_committed_from_a_fresh_connection(self):
         staged = self.stage({'disable_passwords': True})
@@ -212,7 +259,9 @@ class SecurityTests(unittest.TestCase):
                                 return SimpleNamespace(returncode=0 if state['enabled'] == 'enabled' else 1,
                                                        stdout=state['enabled'] + '\n', stderr='')
                             if args[0] == 'systemctl' and args[-1].removesuffix('.service') == 'fail2ban':
-                                if args[1] == 'enable': state.update(active=True, enabled='enabled')
+                                if args[1] == 'enable':
+                                    state['enabled'] = 'enabled'
+                                    if '--now' in args: state['active'] = True
                                 elif args[1] == 'disable': state['enabled'] = 'disabled'
                                 elif args[1] == 'stop': state['active'] = False
                                 elif args[1] == 'start': state['active'] = True
@@ -319,6 +368,209 @@ class SecurityTests(unittest.TestCase):
         self.assertFalse(security.firewall_status(config, ports + [{'protocol': 'tcp', 'port': 1081}])['enabled'])
         staged = self.stage({'firewall': False}); self.confirm(staged['token'])
         self.assertFalse(security.DOCKER_DROPIN.exists())
+
+    def test_reset_restores_earliest_ssh_baseline_and_requires_independent_confirmation(self):
+        original = self.main.read_text()
+        staged = self.stage({'disable_root': True, 'firewall': True})
+        self.confirm(staged['token'])
+        plan = security.reset_preview()
+        self.assertTrue(plan['available'])
+        staged_reset = security.reset_stage(plan['digest'])
+        self.assertEqual(self.main.read_text(), original)
+        self.assertFalse(self.files['firewall'].exists())
+        with self.assertRaisesRegex(ValueError, 'fresh SSH'):
+            security.confirm(staged_reset['token'])
+        self.assertTrue(self.confirm(staged_reset['token'])['confirmed'])
+        self.assertEqual(security.owned(), {})
+        self.assertFalse(security.HELPER.exists())
+
+    def test_reset_does_not_discard_externally_edited_ssh_configuration(self):
+        staged = self.stage({'disable_root': True}); self.confirm(staged['token'])
+        self.main.write_text(self.main.read_text() + '# outside edit\n')
+        with self.assertRaisesRegex(ValueError, 'outside Ashapp'):
+            security.reset_preview()
+
+    def test_firewall_confirmation_does_not_launder_external_main_or_legacy_ssh_edits(self):
+        for path in (self.main, security.LEGACY_SSH):
+            with self.subTest(path=path.name):
+                staged = self.stage({'firewall': True}); self.confirm(staged['token'])
+                tracked = security.read_json(self.state / 'baseline.json')['expected'].copy()
+                original = path.read_bytes() if path.exists() else None
+                path.write_text((original.decode() if original else '') + '# outside administrative edit\n')
+                with self.assertRaisesRegex(ValueError, 'outside Ashapp'):
+                    security.reset_preview()
+                staged = self.stage({'firewall': False}); self.confirm(staged['token'])
+                self.assertEqual(security.read_json(self.state / 'baseline.json')['expected'], tracked)
+                with self.assertRaisesRegex(ValueError, 'outside Ashapp'):
+                    security.reset_preview()
+                self.assertIn('outside administrative edit', path.read_text())
+                if original is None: path.unlink()
+                else: path.write_bytes(original)
+
+    def test_new_ssh_stage_refuses_external_edits_before_any_mutation(self):
+        security.capture_baseline()
+        self.main.write_text(self.main.read_text() + '# outside edit\n')
+        before_commands = len(self.commands)
+        with self.assertRaisesRegex(ValueError, 'outside Ashapp'):
+            security.preview({'disable_root': True})
+        self.assertFalse(self.files['ssh'].exists())
+        self.assertFalse((self.state / 'pending.json').exists())
+        self.assertFalse(any(command[0] == 'systemd-run' for command in self.commands[before_commands:]))
+
+    def test_confirmation_failure_recovers_ssh_tracking_with_the_staged_files(self):
+        staged = self.stage({'disable_root': True})
+        before = security.read_json(self.state / 'baseline.json')['expected'].copy()
+
+        def fail_timer_stop(args, check=True, data=None):
+            if args[:2] == ['systemctl', 'stop'] and args[-1].startswith(security.UNIT + '-'):
+                raise security.SecurityCommandError('Simulated timer-stop failure.')
+            return self.fake_run(args, check, data)
+
+        with patch.object(security, 'run', fail_timer_stop):
+            with self.assertRaisesRegex(security.SecurityCommandError, 'timer-stop'):
+                self.confirm(staged['token'])
+        self.assertTrue((self.state / 'pending.json').exists())
+        self.assertTrue(security.rollback(staged['token'])['rolled_back'])
+        self.assertEqual(security.read_json(self.state / 'baseline.json')['expected'], before)
+        self.assertTrue(security.reset_preview()['available'])
+
+    def test_legacy_ssh_tracking_requires_verified_before_state_and_exact_app_transform(self):
+        security.prepare_legacy_ssh()
+        original = self.main.read_bytes()
+        self.main.write_bytes(b'Include /etc/ssh/ashapp.conf\n' + original)
+        security.LEGACY_SSH.write_bytes(b'PubkeyAuthentication yes\nPermitRootLogin no\n')
+        security.record_legacy_ssh()
+        self.assertTrue(security.reset_preview()['available'])
+        tracked = security.read_json(self.state / 'baseline.json')['expected'].copy()
+        self.main.write_text(self.main.read_text() + '# outside edit\n')
+        with self.assertRaisesRegex(ValueError, 'outside Ashapp'):
+            security.prepare_legacy_ssh()
+        self.assertEqual(security.read_json(self.state / 'baseline.json')['expected'], tracked)
+
+    def test_legacy_ssh_completion_does_not_adopt_external_edit_after_preparation(self):
+        security.prepare_legacy_ssh()
+        tracked = security.read_json(self.state / 'baseline.json')['expected'].copy()
+        self.main.write_text('Include /etc/ssh/ashapp.conf\n' + self.main.read_text() + '# concurrent administrative edit\n')
+        security.LEGACY_SSH.write_text('PubkeyAuthentication yes\n')
+        with self.assertRaisesRegex(ValueError, 'Outside edits were not adopted'):
+            security.record_legacy_ssh()
+        self.assertEqual(security.read_json(self.state / 'baseline.json')['expected'], tracked)
+
+    def exercise_legacy_candidate(self, previous_extra, resulting_extra):
+        security.LEGACY_SSH.write_bytes(previous_extra)
+        security.prepare_legacy_ssh()
+        self.main.write_bytes(b'Include /etc/ssh/ashapp.conf\n' + self.main.read_bytes())
+        security.LEGACY_SSH.write_bytes(resulting_extra)
+        security.record_legacy_ssh()
+        self.assertEqual(security.LEGACY_SSH.read_bytes(), resulting_extra)
+        self.assertTrue(security.reset_preview()['available'])
+
+    def test_legacy_keep_accepts_an_unterminated_root_policy_record(self):
+        self.exercise_legacy_candidate(b'PubkeyAuthentication no\nPermitRootLogin no',
+                                       b'PubkeyAuthentication yes\nPermitRootLogin no')
+
+    def test_legacy_keep_preserves_crlf_on_the_selected_root_policy_record(self):
+        self.exercise_legacy_candidate(b'# original\r\nPermitRootLogin no\r\n# ignored\r\n',
+                                       b'PubkeyAuthentication yes\nPermitRootLogin no\r\n')
+
+    def test_legacy_root_denial_accepts_printf_lf_after_unterminated_input(self):
+        self.exercise_legacy_candidate(b'PermitRootLogin prohibit-password',
+                                       b'PubkeyAuthentication yes\nPermitRootLogin no\n')
+
+    def test_unconfirmed_reset_restores_enabled_boot_policy_for_all_managed_units(self):
+        units = ('fail2ban.service', 'apt-daily.timer', 'apt-daily-upgrade.timer', 'netfilter-persistent.service')
+        state = {unit: {'active': False, 'enabled': 'disabled'} for unit in units}
+
+        def command(args, check=True, data=None):
+            if args[0] == 'systemctl':
+                targets = [unit for unit in args[2:] if unit in state]
+                if args[1] == 'is-enabled' and targets:
+                    value = state[targets[0]]['enabled']
+                    return SimpleNamespace(returncode=0 if value == 'enabled' else 1, stdout=value + '\n', stderr='')
+                for unit in targets:
+                    if args[1] in ('enable', 'disable'):
+                        state[unit]['enabled'] = 'enabled' if args[1] == 'enable' else 'disabled'
+                        if '--now' in args: state[unit]['active'] = args[1] == 'enable'
+                    elif args[1] in ('start', 'stop'):
+                        state[unit]['active'] = args[1] == 'start'
+            return self.fake_run(args, check, data)
+
+        with patch.object(security, 'run', command), \
+                patch.object(security, 'active', side_effect=lambda unit: state.get(unit if '.' in unit else unit + '.service', {}).get('active', False)):
+            security.capture_baseline()
+            for unit in units: state[unit] = {'active': True, 'enabled': 'enabled'}
+            staged = self.stage({'firewall': True}); self.confirm(staged['token'])
+            reset = security.reset_stage(security.reset_preview()['digest'])
+            self.assertTrue(all(value == {'active': False, 'enabled': 'disabled'} for value in state.values()))
+            self.assertTrue(security.rollback(reset['token'])['rolled_back'])
+            self.assertTrue(all(value == {'active': True, 'enabled': 'enabled'} for value in state.values()))
+            self.assertFalse((self.state / 'pending.json').exists())
+
+    def test_failed_unconfirmed_reset_recovers_hardened_policy(self):
+        staged = self.stage({'disable_root': True, 'firewall': True}); self.confirm(staged['token'])
+        hardened = self.main.read_text()
+        plan = security.reset_preview()
+        staged_reset = security.reset_stage(plan['digest'])
+        security.rollback(staged_reset['token'])
+        self.assertEqual(self.main.read_text(), hardened)
+        self.assertTrue(self.files['firewall'].exists())
+        self.assertTrue(security.diagnostics()['firewall']['enabled'])
+
+    def test_disabled_ssh_switch_restores_original_policy_instead_of_widening_it(self):
+        staged = self.stage({'disable_root': True}); self.confirm(staged['token'])
+        # The production Include is absolute; its parser is covered separately.
+        with patch.object(security, 'ssh_policy'):
+            staged = self.stage({'disable_root': False}); self.confirm(staged['token'])
+        self.assertIn('PermitRootLogin prohibit-password', self.files['ssh'].read_text())
+
+    def test_saved_stopped_vpn_listener_is_included_in_firewall_preview(self):
+        directory = security.AWG_DIRECTORY; directory.mkdir()
+        (directory / 'params').write_text('SERVER_AWG_NIC=awg0\n')
+        (directory / 'awg0.conf').write_text('[Interface]\nListenPort = 586\n')
+        plan = security.preview({'firewall': True})
+        self.assertIn(586, plan['ports']['udp'])
+
+    def test_safe_command_diagnostics_identify_logfile_failure_without_echoing_output(self):
+        result = SimpleNamespace(returncode=255, stdout='password=never-print', stderr='Have not found any log file for sshd jail')
+        message = security.command_failure(['fail2ban-client', '-t'], result)
+        self.assertIn('log file', message)
+        self.assertIn('exit 255', message)
+        self.assertNotIn('never-print', message)
+
+    def test_recovery_stops_new_fail2ban_before_restoring_invalid_unused_default(self):
+        daemon = {'running': False}
+
+        def command(args, check=True, data=None):
+            if args[:2] == ['systemctl', 'enable'] and args[-1] == 'fail2ban':
+                daemon['running'] = True
+            if args[:2] == ['systemctl', 'stop'] and args[-1] in ('fail2ban', 'fail2ban.service'):
+                daemon['running'] = False
+            if args == ['fail2ban-client', '-t'] and not self.files['fail2ban'].exists():
+                raise security.SecurityCommandError('The unused distro default expects absent file logs.')
+            return self.fake_run(args, check, data)
+
+        with patch.object(security, 'run', command), \
+                patch.object(security, 'active', side_effect=lambda unit: daemon['running'] if unit.removesuffix('.service') == 'fail2ban' else False), \
+                patch.object(security.shutil, 'which', return_value='/usr/bin/fail2ban-client'):
+            staged = self.stage({'fail2ban': True})
+            self.assertTrue(daemon['running'])
+            self.assertTrue(security.rollback(staged['token'])['rolled_back'])
+            self.assertFalse(daemon['running'])
+            self.assertFalse((self.state / 'pending.json').exists())
+
+    def test_failed_component_diagnostics_do_not_hide_other_security_results(self):
+        self.files['firewall'].write_text('{malformed')
+        result = security.diagnostics()
+        self.assertIn('error', result['firewall'])
+        self.assertIsNotNone(result['ssh'])
+        self.assertIsNotNone(result['listeners'])
+
+    def test_foreign_early_drop_does_not_pass_firewall_rule_membership_check(self):
+        staged = self.stage({'firewall': True}); self.confirm(staged['token'])
+        config = security.read_json(self.files['firewall'])
+        rules = self.chains['iptables', 'ASHAPP-IN']
+        rules.insert(0, rules.pop())
+        self.assertFalse(security.firewall_status(config, [])['enabled'])
 
     @unittest.skipIf(os.name == 'nt', 'POSIX descriptor modes')
     def test_recovery_restores_modes_under_production_umask(self):

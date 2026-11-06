@@ -69,6 +69,37 @@ void main() {
     expect(await file.exists(), isFalse);
   });
 
+  test(
+    'forget removes only the selected endpoint and requires trust again',
+    () async {
+      final store = KnownHosts(file);
+      for (final endpoint in ['203.0.113.1:22', '203.0.113.2:22']) {
+        await store.verify(
+          endpoint,
+          'ssh-ed25519',
+          'SHA256:test',
+          (_, _) async => true,
+        );
+      }
+      await store.forget('203.0.113.1:22');
+      expect((jsonDecode(await file.readAsString()) as Map).keys, [
+        '203.0.113.2:22',
+      ]);
+      var asked = false;
+      expect(
+        await store.verify('203.0.113.1:22', 'ssh-ed25519', 'SHA256:new', (
+          _,
+          _,
+        ) async {
+          asked = true;
+          return true;
+        }),
+        isTrue,
+      );
+      expect(asked, isTrue);
+    },
+  );
+
   test('malformed key store fails closed and is preserved', () async {
     await file.writeAsString('null');
     await expectLater(

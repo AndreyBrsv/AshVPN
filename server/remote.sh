@@ -19,7 +19,13 @@ info() { printf '%s\n' "[INFO] $*" | tee -a "$LOG"; }
 ok() { printf '%s[OK]%s %s\n' "$GREEN" "$NC" "$*" | tee -a "$LOG"; }
 warn() { printf '%s[WARN]%s %s\n' "$YELLOW" "$NC" "$*" | tee -a "$LOG" >&2; }
 err() { printf '%s[ERROR]%s %s\n' "$RED" "$NC" "$*" | tee -a "$LOG" >&2; }
-fatal() { err "$*"; exit 1; }
+fatal() {
+    err "$*"
+    if command -v python3 >/dev/null && [[ -f "$BASE_DIR/lifecycle.py" ]]; then
+        python3 "$BASE_DIR/lifecycle.py" record-action "$ACTION" failed 1 </dev/null || true
+    fi
+    exit 1
+}
 field() { IFS= read -r -d '' "$1" || fatal "Missing input fields."; }
 port_ok() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 username_ok() { [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,30}$ && "$1" != root && "$1" != nobody ]]; }
@@ -54,6 +60,9 @@ on_error() {
     fi
     # BASH_COMMAND contains variable references, not their secret values. Stdin is never logged.
     err "Action $ACTION, line $line, code $code. Command: $command"
+    if command -v python3 >/dev/null && [[ -f "$BASE_DIR/lifecycle.py" ]]; then
+        python3 "$BASE_DIR/lifecycle.py" record-action "$ACTION" failed "$code" </dev/null || true
+    fi
     cleanup
     exit "$code"
 }
@@ -63,6 +72,7 @@ if [[ "$ACTION" == --help ]]; then
     exit 0
 fi
 [[ $EUID -eq 0 ]] || { printf 'ERROR: root is required.\n' >&2; exit 1; }
+[[ ! -L "$LOG" && ( ! -e "$LOG" || -f "$LOG" ) ]] || { printf 'ERROR: Unsafe action log path.\n' >&2; exit 1; }
 touch "$LOG"; chmod 600 "$LOG"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 trap 'restore_ssh; cleanup' EXIT
@@ -89,6 +99,17 @@ preflight() {
         "$ID" "$VERSION_ID" "$(uname -r)" "$(uname -m)" "$python"
 }
 
+ensure_ssh_ready() {
+    # Ubuntu's socket-activated OpenSSH package upgrade can stop ssh.service
+    # and remove /run/sshd while this accepted session stays connected. A new
+    # login would start it again, but sshd -t/-T in this session fails first.
+    # Starting the existing unit restores its owned runtime directory without
+    # restarting an active daemon or changing its socket/configuration policy.
+    systemctl start ssh || systemctl start sshd
+    /usr/sbin/sshd -t
+    ok 'SSH service is ready; existing sessions are preserved.'
+}
+
 dependencies() {
     header 'Base packages'
     printf '%s\n' 'iptables-persistent iptables-persistent/autosave_v4 boolean false' \
@@ -96,6 +117,7 @@ dependencies() {
     apt-get -o DPkg::Options::=--force-confold -o DPkg::Lock::Timeout=180 update
     apt-get -o DPkg::Options::=--force-confold -o DPkg::Lock::Timeout=180 install -y sudo curl wget ca-certificates python3 openssh-server \
         iptables iptables-persistent procps iproute2
+    ensure_ssh_ready
     ok 'Base dependencies installed.'
 }
 
@@ -103,6 +125,7 @@ upgrade() {
     header 'System upgrade'
     apt-get -o DPkg::Options::=--force-confold -o DPkg::Lock::Timeout=180 update
     apt-get -o DPkg::Options::=--force-confold -o DPkg::Lock::Timeout=180 upgrade -y
+    ensure_ssh_ready
     if [[ -f /var/run/reboot-required ]]; then warn 'Reboot before building AmneziaWG.'; fi
 }
 
@@ -111,8 +134,10 @@ root_password() {
     local password
     field password
     [[ ${#password} -ge 8 && "$password" != *$'\n'* && "$password" != *$'\r'* ]] || fatal 'Invalid password.'
+    python3 "$BASE_DIR/lifecycle.py" record-credential root-password started
     printf 'root:%s\n' "$password" | chpasswd
     unset password
+    python3 "$BASE_DIR/lifecycle.py" record-credential root-password committed
     ok 'Root password changed.'
 }
 
@@ -136,8 +161,10 @@ create_user() {
     install -o root -g root -m 0440 "$temporary" "/etc/sudoers.d/90-ashapp-$user"
     rm -f -- "$temporary"
     visudo -cf /etc/sudoers
+    python3 "$BASE_DIR/lifecycle.py" record-credential administrator started
     printf '%s:%s\n' "$user" "$password" | chpasswd
     unset password
+    python3 "$BASE_DIR/lifecycle.py" record-credential administrator committed
     ok 'Passwordless sudo granted to the administrator.'
 }
 
@@ -257,6 +284,9 @@ icmp() {
     if [[ -e /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp ]] && ! grep -qF 'ashapp-owned-icmp-v1' /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp; then
         fatal 'An existing ping rule or plugin needs manual review; it was not changed.'
     fi
+    if [[ -e /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp ]]; then
+        python3 "$BASE_DIR/lifecycle.py" verify-ping </dev/null >/dev/null
+    fi
     cat > /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp <<'PLUGIN'
 #!/bin/sh
 # ashapp-owned-icmp-v1
@@ -317,12 +347,7 @@ PY
 }
 
 docker_ready() {
-    if ! command -v docker >/dev/null; then
-        apt-get -o DPkg::Options::=--force-confold -o DPkg::Lock::Timeout=180 update
-        apt-get -o DPkg::Options::=--force-confold -o DPkg::Lock::Timeout=180 install -y docker.io
-    fi
-    systemctl enable --now docker
-    docker info >/dev/null
+    python3 "$BASE_DIR/docker_setup.py"
 }
 
 socks_install() {
@@ -335,10 +360,14 @@ socks_install() {
     port_ok "$port" || fatal 'Invalid port.'
     [[ "$user" =~ ^[a-zA-Z0-9_]{1,128}$ && "$password" =~ ^[a-zA-Z0-9_]{8,128}$ ]] || fatal 'SOCKS5 credentials must use letters, digits or underscores.'
     if [[ "$access" == private ]]; then
+        # A fresh VPS has no daemon to inspect yet. Install/start a missing
+        # Docker first, while preserving the early refusal for existing shared
+        # daemons. Never create a localhost publication before the version check.
+        if ! command -v docker >/dev/null; then docker_ready; fi
         python3 "$BASE_DIR/clients.py" socks-private-ready >/dev/null
     fi
     docker_ready
-    if docker inspect amnezia-socks5proxy >/dev/null 2>&1 && [[ "$replace" != yes ]]; then
+    if docker inspect --type container amnezia-socks5proxy >/dev/null 2>&1 && [[ "$replace" != yes ]]; then
         fatal 'SOCKS5 already exists. Explicit replacement is required.'
     fi
     directory=/opt/ashapp/socks5
@@ -346,6 +375,7 @@ socks_install() {
     cat > "$directory/Dockerfile" <<'DOCKERFILE'
 FROM 3proxy/3proxy:busybox@sha256:1b21878c40b112723bd525d3282afb19136e6ccfd2b626b1ca0f53737c26bde1
 LABEL org.opencontainers.image.title="Amnezia-compatible SOCKS5 / Ashapp"
+LABEL io.ashapp.managed="socks5-v1"
 RUN mkdir -p /opt/amnezia /usr/local/3proxy/conf /usr/local/3proxy/logs
 COPY start.sh /opt/amnezia/start.sh
 ENTRYPOINT ["/bin/sh", "/opt/amnezia/start.sh"]
@@ -358,8 +388,8 @@ fi
 exec tail -f /dev/null
 START
     docker build -t amnezia-socks5proxy "$directory"
-    if docker inspect amnezia-socks5proxy >/dev/null 2>&1; then
-        SOCKS_WAS_RUNNING="$(docker inspect -f '{{.State.Running}}' amnezia-socks5proxy)"
+    if docker inspect --type container amnezia-socks5proxy >/dev/null 2>&1; then
+        SOCKS_WAS_RUNNING="$(docker inspect --type container -f '{{.State.Running}}' amnezia-socks5proxy)"
         SOCKS_BACKUP="ashapp-socks5-backup-$(date +%s%N)"
         docker stop amnezia-socks5proxy >/dev/null
         docker rename amnezia-socks5proxy "$SOCKS_BACKUP"
@@ -367,7 +397,7 @@ START
     SOCKS_NEW=1
     bind="$port:$port/tcp"
     if [[ "$access" == private ]]; then bind="127.0.0.1:$port:$port/tcp"; fi
-    docker run -d --restart always -p "$bind" --name amnezia-socks5proxy amnezia-socks5proxy >/dev/null
+    docker run -d --restart always --label io.ashapp.managed=socks5-v1 -p "$bind" --name amnezia-socks5proxy amnezia-socks5proxy >/dev/null
     SECRET_TMP="$(mktemp /run/ashapp.XXXXXXXXXX)"
     {
         printf 'config /usr/local/3proxy/conf/3proxy.cfg\n'
@@ -389,12 +419,19 @@ START
         docker rm "$previous" >/dev/null || warn 'New SOCKS5 is healthy; an old stopped container could not be removed.'
     fi
     ok 'SOCKS5 authentication verified.'
+    warn 'AmneziaVPN caches existing SOCKS5 credentials on this computer. Update its saved proxy credentials there, or remove and rediscover that service. Server-side changes cannot update another application on your computer.'
 }
+
+if command -v python3 >/dev/null && [[ -f "$BASE_DIR/lifecycle.py" ]]; then
+    python3 "$BASE_DIR/lifecycle.py" record-action "$ACTION" running </dev/null
+fi
 
 case "$ACTION" in
     preflight) preflight ;;
-    security-status|security-preview|security-stage|security-confirm|security-rollback|security-unban)
+    security-status|security-preview|security-stage|security-setup|security-confirm|security-rollback|security-unban|security-reset-preview|security-reset-stage)
         python3 "$BASE_DIR/security_manager.py" "$ACTION" ;;
+    lifecycle-status|lifecycle-begin|lifecycle-step|lifecycle-finish|diagnostics|reset-preview|reset)
+        python3 "$BASE_DIR/lifecycle.py" "$ACTION" ;;
     dependencies) dependencies ;;
     upgrade) upgrade ;;
     root-password) root_password ;;
@@ -403,6 +440,9 @@ case "$ACTION" in
     icmp) icmp ;;
     prepare-awg) prepare_awg ;;
     install-awg-configured) python3 "$BASE_DIR/awg_setup.py" ;;
+    install-awg-amnezia)
+        docker_ready </dev/null
+        python3 "$BASE_DIR/amnezia_setup.py" ;;
     install-vless|vless-control) python3 "$BASE_DIR/vless_manager.py" "$ACTION" ;;
     check-awg) check_awg ;;
     socks-install) socks_install ;;
@@ -425,6 +465,7 @@ case "$ACTION" in
     icmp-unblock)
         if [[ -x /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp ]]; then
             grep -qF 'ashapp-owned-icmp-v1' /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp || fatal 'The existing ping plugin needs manual review; no rules were removed.'
+            python3 "$BASE_DIR/lifecycle.py" verify-ping </dev/null >/dev/null
             /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp flush
             rm -f /usr/share/netfilter-persistent/plugins.d/90-ashapp-icmp
         fi
@@ -434,3 +475,7 @@ case "$ACTION" in
         systemd-run --unit="ashapp-reboot-$(date +%s)" --on-active=3s /usr/sbin/reboot ;;
     *) fatal 'Unknown action.' ;;
 esac
+
+if command -v python3 >/dev/null && [[ -f "$BASE_DIR/lifecycle.py" ]]; then
+    python3 "$BASE_DIR/lifecycle.py" record-action "$ACTION" done </dev/null
+fi

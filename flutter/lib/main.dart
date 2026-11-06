@@ -24,12 +24,14 @@ import 'template_repository.dart';
 import 'ui_components.dart';
 import 'workspace_controller.dart';
 import 'security_panel.dart';
+import 'server_installation_panel.dart';
 import 'operation_progress.dart';
 import 'private_key_field.dart';
 import 'workspace_shell.dart';
 import 'server_workspace.dart';
 import 'vless_connection.dart';
 import 'local_data_cleanup.dart';
+import 'activity_console.dart';
 
 export 'workspace_controller.dart' show SshConnector;
 
@@ -114,6 +116,8 @@ class _AshappAppState extends State<AshappApp> {
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: colors.surfaceContainerLowest,
+        helperMaxLines: 8,
+        errorMaxLines: 4,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       ),
       filledButtonTheme: FilledButtonThemeData(
@@ -334,6 +338,44 @@ class _HomePageState extends State<HomePage> {
         showNotice(
           context,
           'Could not unlock the template. Check the OS credential store.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => opening = false);
+    }
+  }
+
+  Future<void> resumeSetup() async {
+    final target = vm;
+    if (opening || target.busy) return;
+    setState(() => opening = true);
+    try {
+      final draft = await target.recoveryDraft();
+      if (!mounted) return;
+      if (draft == null) {
+        showNotice(
+          context,
+          'Recovery answers are not available in this device’s OS vault. The server journal is preserved. Open the full setup wizard with your template to review a new plan.',
+        );
+        return;
+      }
+      await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SetupWizard(
+            controller: target,
+            useConnected: true,
+            initial: draft.answers,
+            secrets: draft.secrets,
+            resumeRunId: draft.runId,
+          ),
+        ),
+      );
+    } catch (_) {
+      if (mounted) {
+        showNotice(
+          context,
+          'Could not unlock saved setup answers. Unlock the OS credential vault and retry.',
         );
       }
     } finally {
@@ -587,7 +629,10 @@ class _HomePageState extends State<HomePage> {
                     IconButton(
                       tooltip: 'Forget server on this device',
                       icon: const Icon(Icons.delete_outline),
-                      onPressed: busy
+                      onPressed:
+                          busy ||
+                              (workspace.find(profile)?.connected ?? false) ||
+                              (workspace.find(profile)?.busy ?? false)
                           ? null
                           : () async {
                               final target = vm;
@@ -595,7 +640,7 @@ class _HomePageState extends State<HomePage> {
                               if (await confirmAction(
                                 context,
                                 'Forget server?',
-                                'Remove the saved address and SSH credentials from this device? The server and VPN clients will stay intact.',
+                                'Remove the saved address, SSH credentials and trusted host key from this device? The server and VPN clients will stay intact. Disconnect this server first.',
                                 action: 'Forget',
                               )) {
                                 await target.removeProfile(profile);
@@ -622,15 +667,17 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.add),
             label: const Text('Create template'),
           ),
-          if (vm.templateCleanupPending)
+          if (vm.templateCleanupPending) ...[
+            const SizedBox(height: 16),
             const Text(
               'Unlock your OS credential store to remove unused saved answers.',
             ),
-          if (vm.templateCleanupPending)
+            const SizedBox(height: 12),
             OutlinedButton(
               onPressed: busy ? null : vm.retryTemplateCleanup,
               child: const Text('Retry protected cleanup'),
             ),
+          ],
         ],
       ),
       if (vm.templates.isEmpty)
@@ -699,6 +746,12 @@ class _HomePageState extends State<HomePage> {
           title: 'Server overview',
           subtitle: 'SSH ${vm.ssh!.user} · port ${vm.ssh!.port}',
           children: [
+            if (vm.operatingSystem['os'] != null) ...[
+              Text(
+                'Detected OS: ${vm.operatingSystem['os']} ${vm.operatingSystem['version']} · ${vm.operatingSystem['architecture']}',
+              ),
+              const SizedBox(height: 12),
+            ],
             if (vm.busy) OperationProgress(controller: vm),
             Wrap(
               spacing: 8,
@@ -711,6 +764,11 @@ class _HomePageState extends State<HomePage> {
                 OutlinedButton(
                   onPressed: busy ? null : () => wizard(current: true),
                   child: const Text('Run setup wizard'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => showActivityConsole(context, vm),
+                  icon: const Icon(Icons.terminal_outlined),
+                  label: const Text('Server activity'),
                 ),
               ],
             ),
@@ -740,12 +798,28 @@ class _HomePageState extends State<HomePage> {
               ),
           ],
         ),
+        ServerInstallationPanel(
+          key: ValueKey(('installation', vm)),
+          controller: vm,
+          onResume: resumeSetup,
+        ),
         SectionCard(
           title: 'AmneziaWG',
           subtitle:
               '${awg ? 'Running' : 'Stopped or not installed'}${vm.server['kernel'] == true ? ' · kernel interface verified' : ''}${vm.server['awg_port'] != null ? ' · UDP ${vm.server['awg_port']}' : ''}',
           children: [
-            if (vm.server['interface'] != null)
+            if (vm.server['awg_deployment'] == 'amnezia') ...[
+              const Text(
+                'Experimental',
+                style: TextStyle(
+                  color: Colors.redAccent,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            if (vm.server['interface'] != null ||
+                vm.server['awg_deployment'] == 'amnezia')
               serviceButtons('awg', awg)
             else if (vm.server['awg_configured'] != true)
               OutlinedButton(
@@ -753,23 +827,27 @@ class _HomePageState extends State<HomePage> {
                 child: const Text('Configure VPN'),
               ),
             const SizedBox(height: 12),
-            const Text(
-              'Import exported client configurations into AmneziaWG or another compatible app. Ashapp manages the server; it does not run a local VPN tunnel.',
+            Text(
+              vm.server['awg_deployment'] == 'amnezia'
+                  ? 'Shared kernel is experimental and may not work with your AmneziaVPN version. Discovery and management in the official app are not guaranteed. Refresh after external edits and use one manager at a time.'
+                  : 'Import a client key from Clients into AmneziaVPN to connect. Manage this host kernel installation in Ashapp; AmneziaVPN SSH setup does not adopt it.',
             ),
           ],
         ),
         for (final source in vm.server['external_awg'] as List? ?? [])
-          SectionCard(
-            title: 'AmneziaVPN · ${source['source']}',
-            subtitle: source['running'] == true
-                ? 'Running in Docker'
-                : 'Container stopped',
-            children: const [
-              Text(
-                'Manage clients in Clients. Use AmneziaVPN for container service controls. Ashapp will not replace this deployment.',
-              ),
-            ],
-          ),
+          if (vm.server['awg_deployment'] != 'amnezia' ||
+              source['source'] != 'amnezia-awg2')
+            SectionCard(
+              title: 'AmneziaWG · ${source['source']}',
+              subtitle: source['running'] == true
+                  ? 'Installed by AmneziaVPN · ${source['kernel'] == true ? 'kernel' : 'external container'}'
+                  : 'Container stopped',
+              children: const [
+                Text(
+                  'Manage clients in Clients. Use AmneziaVPN for container service controls. Ashapp will not replace this deployment.',
+                ),
+              ],
+            ),
         SectionCard(
           title: 'VLESS + Reality + XTLS Vision',
           subtitle:
@@ -796,13 +874,17 @@ class _HomePageState extends State<HomePage> {
           subtitle:
               '${socks ? 'Running' : 'Stopped or not installed'}${vm.server['socks5_port'] != null ? ' · TCP ${vm.server['socks5_port']}' : ''}',
           children: [
-            if (vm.server['socks5_access_warning'] != null)
+            if (vm.server['socks5_access_warning'] != null) ...[
               Text(vm.server['socks5_access_warning'].toString()),
+              const SizedBox(height: 12),
+            ],
             if (vm.server['socks5_access'] == 'private') ...[
-              if (vm.server['socks5_private_supported'] != false)
+              if (vm.server['socks5_private_supported'] != false) ...[
                 const Text(
                   'Private access · server loopback only. Keep Ashapp connected while using the SSH tunnel.',
                 ),
+                const SizedBox(height: 12),
+              ],
               OutlinedButton(
                 onPressed:
                     busy ||
@@ -818,8 +900,11 @@ class _HomePageState extends State<HomePage> {
                       : 'Stop private SOCKS5 tunnel',
                 ),
               ),
-              if (vm.socksTunnel != null)
+              const SizedBox(height: 12),
+              if (vm.socksTunnel != null) ...[
                 Text('Local proxy: 127.0.0.1:${vm.socksTunnel!.port}'),
+                const SizedBox(height: 12),
+              ],
             ],
             if (vm.server['socks5_configured'] == true || socks) ...[
               serviceButtons('socks', socks),
@@ -846,6 +931,10 @@ class _HomePageState extends State<HomePage> {
                       },
                 child: const Text('Show connection details'),
               ),
+            const SizedBox(height: 8),
+            const Text(
+              'AmneziaVPN keeps its own cached SOCKS5 login and password. After changing credentials here, update or re-add the SOCKS5 connection there. Private SOCKS5 uses Ashapp’s SSH tunnel.',
+            ),
           ],
         ),
         SecurityPanel(key: ObjectKey(vm), controller: vm),
@@ -963,16 +1052,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
         ),
-        if (vm.log.isNotEmpty)
-          ExpansionTile(
-            title: const Text('Activity details'),
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: SelectableText(vm.log),
-              ),
-            ],
-          ),
+        if (vm.log.isNotEmpty) ActivityConsole(controller: vm),
       ],
     );
   }
@@ -1082,7 +1162,9 @@ class _HomePageState extends State<HomePage> {
                     runSpacing: 8,
                     children: [
                       IconButton.filledTonal(
-                        tooltip: 'Copy connection',
+                        tooltip: client['source'] == VlessConnection.source
+                            ? 'Copy connection'
+                            : 'Copy Amnezia link',
                         onPressed: busy || client['can_export'] == false
                             ? null
                             : () => copyClientConnection(
@@ -1350,6 +1432,12 @@ class _HomePageState extends State<HomePage> {
           error: vm.error,
           message: vm.message,
           actions: [
+            if (vm.ssh != null || vm.log.isNotEmpty)
+              IconButton(
+                tooltip: 'Server activity',
+                onPressed: () => showActivityConsole(context, vm),
+                icon: const Icon(Icons.terminal_outlined),
+              ),
             if (AppearanceScope.maybeOf(context) case final appearance?)
               IconButton(
                 tooltip: 'Appearance',
@@ -1419,6 +1507,7 @@ class _ValuesDialogState extends State<ValuesDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
     title: Text(widget.title),
     content: SizedBox(
       width: 440,
@@ -1527,6 +1616,7 @@ class _ConnectDialogState extends State<ConnectDialog> {
       return PopScope(
         canPop: !vm.busy,
         child: AlertDialog(
+          scrollable: true,
           title: const Text('Connect to a server'),
           content: SizedBox(
             width: 440,
@@ -1565,6 +1655,7 @@ class _ConnectDialogState extends State<ConnectDialog> {
                       enabled: !vm.busy,
                       label: 'SSH private key (paste)',
                     ),
+                    const SizedBox(height: 16),
                     SecretField(
                       controller: passphrase,
                       label: 'Key passphrase (optional)',
@@ -1577,6 +1668,7 @@ class _ConnectDialogState extends State<ConnectDialog> {
                       label: 'Password',
                       enabled: !vm.busy,
                     ),
+                  const SizedBox(height: 12),
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Remember credentials on this device'),
@@ -1588,6 +1680,7 @@ class _ConnectDialogState extends State<ConnectDialog> {
                   ),
                   if (vm.error.isNotEmpty)
                     Semantics(liveRegion: true, child: Text(vm.error)),
+                  ChangedServerKeyAction(controller: vm),
                   if (vm.busy) const LinearProgressIndicator(),
                 ],
               ),

@@ -39,6 +39,7 @@ const login = ConnectionDetails(
 
 ServerTemplate answers({bool awg = true}) => ServerTemplate(
   name: 'Both',
+  awgDeployment: 'host',
   blockPing: false,
   disableRoot: false,
   installAwg: awg,

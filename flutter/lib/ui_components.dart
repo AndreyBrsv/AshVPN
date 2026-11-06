@@ -8,6 +8,7 @@ import 'vless_export_dialog.dart';
 import 'client_configuration.dart';
 import 'private_export.dart';
 import 'private_qr.dart';
+import 'amnezia_connection.dart';
 
 class SectionCard extends StatelessWidget {
   const SectionCard({
@@ -73,13 +74,29 @@ class _SecretFieldState extends State<SecretField> {
     decoration: InputDecoration(
       labelText: widget.label,
       helperText: widget.helper,
-      suffixIcon: IconButton(
-        tooltip: reveal ? 'Hide password' : 'Show password',
-        onPressed: widget.enabled
-            ? () => setState(() => reveal = !reveal)
-            : null,
-        icon: Icon(
-          reveal ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+      suffixIcon: ListenableBuilder(
+        listenable: widget.controller,
+        builder: (context, _) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.controller.text.isNotEmpty)
+              IconButton(
+                tooltip: 'Clear password',
+                onPressed: widget.enabled ? widget.controller.clear : null,
+                icon: const Icon(Icons.close),
+              ),
+            IconButton(
+              tooltip: reveal ? 'Hide password' : 'Show password',
+              onPressed: widget.enabled
+                  ? () => setState(() => reveal = !reveal)
+                  : null,
+              icon: Icon(
+                reveal
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+              ),
+            ),
+          ],
         ),
       ),
     ),
@@ -95,6 +112,7 @@ Future<bool> confirmAction(
     await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: Text(title),
         content: Text(description),
         actions: [
@@ -119,6 +137,7 @@ Future<bool> confirmServerKey(
     await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: const Text('Verify server key'),
         content: SelectableText(
           'Compare this fingerprint with your hosting provider:\n\n$type\n$fingerprint\n\nTrust this server key?',
@@ -136,6 +155,59 @@ Future<bool> confirmServerKey(
       ),
     ) ??
     false;
+
+class ChangedServerKeyAction extends StatelessWidget {
+  const ChangedServerKeyAction({super.key, required this.controller});
+
+  final WorkspaceController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final change = controller.changedHostKey;
+    if (change == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: OutlinedButton.icon(
+        icon: const Icon(Icons.fingerprint),
+        label: const Text('Review changed server key'),
+        onPressed: controller.busy
+            ? null
+            : () async {
+                final accepted = await showDialog<bool>(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    scrollable: true,
+                    title: const Text('SSH server key changed'),
+                    content: SelectableText(
+                      'Server: ${change.endpoint}\n\n'
+                      'Previously trusted:\n${change.previousKey}\n\n'
+                      'New key:\n${change.replacementKey}\n\n'
+                      'A server reinstall can change this key. Confirm the new fingerprint '
+                      'through your hosting provider or another connection you already trust '
+                      'before replacing it.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context, false),
+                        child: const Text('Cancel'),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(context, true),
+                        child: const Text('Trust new key'),
+                      ),
+                    ],
+                  ),
+                );
+                if (accepted != true || !context.mounted) return;
+                if (await controller.acceptChangedHostKey(change) &&
+                    context.mounted) {
+                  showNotice(context, 'Server key updated. Connect again.');
+                }
+              },
+      ),
+    );
+  }
+}
 
 void showNotice(BuildContext context, String message) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
@@ -172,11 +244,18 @@ Future<void> copyClientConnection(
   if (source == VlessConnection.source) {
     content = (await controller.vlessConnection(name, publicKey ?? ''))?.link;
   } else {
-    content = await controller.clientConfig(
+    final config = await controller.clientConfig(
       name,
       source: source,
       publicKey: publicKey,
     );
+    if (config == null || !context.mounted) return;
+    try {
+      content = AmneziaConnection.fromConfig(name, config).link;
+    } on FormatException catch (error) {
+      if (context.mounted) showNotice(context, error.message);
+      return;
+    }
   }
   if (!context.mounted || content == null) return;
   await copyClientValue(
@@ -243,6 +322,31 @@ class ClientExportDialog extends StatefulWidget {
 class _ClientExportDialogState extends State<ClientExportDialog> {
   bool saving = false;
   late bool qr = widget.initialQr;
+  AmneziaConnection? amnezia;
+  String? linkError;
+  bool useLink = false;
+  int revision = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    readFormats();
+  }
+
+  void readFormats() {
+    revision++;
+    try {
+      amnezia = AmneziaConnection.fromConfig(widget.name, widget.config);
+      linkError = null;
+    } on FormatException catch (error) {
+      amnezia = null;
+      linkError = error.message;
+    }
+    qr = widget.initialQr;
+    useLink = amnezia != null && !qr;
+  }
+
+  String get content => useLink ? amnezia!.link : widget.config;
 
   @override
   void didUpdateWidget(covariant ClientExportDialog oldWidget) {
@@ -250,19 +354,21 @@ class _ClientExportDialogState extends State<ClientExportDialog> {
     if (oldWidget.config != widget.config ||
         oldWidget.endpoint != widget.endpoint ||
         oldWidget.name != widget.name) {
-      qr = widget.initialQr;
+      readFormats();
     }
   }
 
   Future<void> save() async {
+    final value = content;
+    final extension = useLink ? 'vpn' : 'conf';
     setState(() => saving = true);
     try {
       final result = await getSaveLocation(
         suggestedName:
-            '${'${widget.name}-${widget.endpoint}'.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_')}.conf',
+            '${'${widget.name}-${widget.endpoint}'.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_')}.$extension',
       );
       if (result == null) return;
-      await savePrivateExport(result.path, widget.config);
+      await savePrivateExport(result.path, value);
       if (mounted) showNotice(context, 'Configuration saved. Keep it private.');
     } catch (_) {
       if (mounted) {
@@ -278,52 +384,92 @@ class _ClientExportDialogState extends State<ClientExportDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
     title: Text('VPN access · ${widget.name}\n${widget.endpoint}'),
     content: SizedBox(
       width: 540,
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'This is the saved configuration of this existing client. Opening, copying or showing its QR code does not create or rotate any key.',
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<bool>(
+            key: ValueKey(revision),
+            initialValue: useLink,
+            decoration: const InputDecoration(labelText: 'Export format'),
+            isExpanded: true,
+            items: [
+              DropdownMenuItem(
+                value: true,
+                enabled: amnezia != null,
+                child: const Text('AmneziaVPN link (vpn://)'),
+              ),
+              const DropdownMenuItem(
+                value: false,
+                child: Text('Native configuration (.conf)'),
+              ),
+            ],
+            onChanged: saving
+                ? null
+                : (value) {
+                    if (value == null || (value && amnezia == null)) return;
+                    setState(() {
+                      useLink = value;
+                      if (value) qr = false;
+                    });
+                  },
+          ),
+          const SizedBox(height: 12),
+          if (useLink)
             const Text(
-              'This is the saved configuration of this existing client. Opening, copying or showing its QR code does not create or rotate any key.',
+              'In AmneziaVPN, choose + and paste the copied key. This gives one device VPN access. It does not add SSH administration in AmneziaVPN. Manage this client in Ashapp.',
             ),
-            const SizedBox(height: 16),
+          if (linkError != null)
+            Text(linkError!, style: Theme.of(context).textTheme.bodySmall),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  useLink ? 'AmneziaVPN link' : 'Client configuration',
+                ),
+              ),
+              IconButton.filledTonal(
+                tooltip: useLink ? 'Copy Amnezia link' : 'Copy configuration',
+                onPressed: saving
+                    ? null
+                    : () => copyClientValue(
+                        context,
+                        content,
+                        useLink
+                            ? 'Amnezia link copied. Paste it in AmneziaVPN.'
+                            : 'Configuration copied, including its original private key.',
+                      ),
+                icon: const Icon(Icons.copy),
+              ),
+            ],
+          ),
+          if (ClientConfiguration(widget.config).privateKey
+              case final String key)
             Row(
               children: [
-                const Expanded(child: Text('Client configuration')),
-                IconButton.filledTonal(
-                  tooltip: 'Copy configuration',
+                const Expanded(child: Text('Private key')),
+                IconButton(
+                  tooltip: 'Copy private key',
                   onPressed: saving
                       ? null
                       : () => copyClientValue(
                           context,
-                          widget.config,
-                          'Configuration copied, including its original private key.',
+                          key,
+                          'Private key copied. Keep it secret.',
                         ),
                   icon: const Icon(Icons.copy),
                 ),
               ],
             ),
-            if (ClientConfiguration(widget.config).privateKey
-                case final String key)
-              Row(
-                children: [
-                  const Expanded(child: Text('Private key')),
-                  IconButton(
-                    tooltip: 'Copy private key',
-                    onPressed: saving
-                        ? null
-                        : () => copyClientValue(
-                            context,
-                            key,
-                            'Private key copied. Keep it secret.',
-                          ),
-                    icon: const Icon(Icons.copy),
-                  ),
-                ],
-              ),
-            const SizedBox(height: 8),
+          const SizedBox(height: 8),
+          if (!useLink)
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -334,22 +480,24 @@ class _ClientExportDialogState extends State<ClientExportDialog> {
                 ),
               ],
             ),
-            if (qr)
-              Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 420),
-                  child: AspectRatio(
-                    aspectRatio: 1,
-                    child: PrivateQr(
-                      data: widget.config,
-                      label: 'Private configuration QR code for this existing client',
-                      fallback: 'This configuration is too large for a QR code. Copy it or save the .conf file instead. No key was changed.',
-                    ),
-                  ),
+          if (qr)
+            Center(
+              // Bound both axes before qr_flutter's LayoutBuilder. The
+              // scrolling dialog measures its content's intrinsic height.
+              child: SizedBox.square(
+                dimension: (MediaQuery.sizeOf(context).width - 128).clamp(
+                  1.0,
+                  420.0,
+                ),
+                child: PrivateQr(
+                  data: widget.config,
+                  label:
+                      'Private configuration QR code for this existing client',
+                  fallback: 'This configuration is too large for a QR code. Copy it or save the .conf file instead. No key was changed.',
                 ),
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     ),
     actions: [
@@ -359,7 +507,7 @@ class _ClientExportDialogState extends State<ClientExportDialog> {
       ),
       FilledButton(
         onPressed: saving ? null : save,
-        child: const Text('Save .conf'),
+        child: Text(useLink ? 'Save .vpn' : 'Save .conf'),
       ),
     ],
   );

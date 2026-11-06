@@ -49,6 +49,7 @@ void main() {
         'disable_password_login',
         'generate_ssh_key',
         'socks_access',
+        'awg_deployment',
       });
       expect((await repository.load()).single.clientNames, ['phone']);
     } finally {

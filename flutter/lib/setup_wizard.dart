@@ -9,6 +9,7 @@ import 'workspace_controller.dart';
 import 'vless_connection.dart';
 import 'operation_progress.dart';
 import 'private_key_field.dart';
+import 'activity_console.dart';
 
 /// Manual setup and templates edit the same questions and execute one plan.
 class SetupWizard extends StatefulWidget {
@@ -19,11 +20,13 @@ class SetupWizard extends StatefulWidget {
     this.useConnected = false,
     this.initial,
     this.secrets = const SetupSecrets(),
+    this.resumeRunId,
   });
   final WorkspaceController controller;
   final bool editTemplate, useConnected;
   final ServerTemplate? initial;
   final SetupSecrets secrets;
+  final String? resumeRunId;
   @override
   State<SetupWizard> createState() => _SetupWizardState();
 }
@@ -46,6 +49,7 @@ class _SetupWizardState extends State<SetupWizard> {
       automaticUpdates = false,
       disablePasswords = false;
   String socksAccess = 'public';
+  String awgDeployment = ServerTemplate.defaultAwgDeployment;
   final dns = TextEditingController(text: '1.1.1.1'),
       socksPort = TextEditingController(text: '1080');
   final socksUser = TextEditingController(),
@@ -70,6 +74,12 @@ class _SetupWizardState extends State<SetupWizard> {
   String localError = '';
   WorkspaceController get vm => widget.controller;
   bool get busy => vm.busy || loading;
+  void _resetConnectionCredentials() {
+    login.text = 'root';
+    loginPassword.clear();
+    keyLogin = false;
+  }
+
   static const labels = [
     'Server',
     'Account',
@@ -85,6 +95,9 @@ class _SetupWizardState extends State<SetupWizard> {
     super.initState();
     if (widget.initial != null) {
       _apply(widget.initial!, widget.secrets);
+      if (!widget.editTemplate && !widget.useConnected) {
+        _resetConnectionCredentials();
+      }
       if (vm.templates.any((t) => t.name == widget.initial!.name)) {
         selection = 'template:${widget.initial!.name}';
       }
@@ -95,16 +108,52 @@ class _SetupWizardState extends State<SetupWizard> {
       login.text = vm.ssh!.user;
       loginPassword.text = vm.ssh!.password;
       createAdmin = widget.initial?.createAdmin ?? false;
-      if (privateKey.text.isEmpty) {
+      if (privateKey.text.isEmpty && widget.resumeRunId == null) {
         privateKey.text = vm.ssh!.privateKey;
         keyPassphrase.text = vm.ssh!.keyPassphrase;
       }
       keyLogin = vm.ssh!.usesKey;
       if (widget.initial == null) {
-        protectSsh = false;
-        configureFirewall = false;
+        protectSsh =
+            (vm.security?['fail2ban'] as Map?)?['managed'] == true &&
+            (vm.security?['fail2ban'] as Map?)?['enabled'] == true;
+        configureFirewall = vm.managesFirewall;
+        automaticUpdates =
+            (vm.security?['automatic_updates'] as Map?)?['managed'] == true &&
+            (vm.security?['automatic_updates'] as Map?)?['enabled'] == true;
+        blockPing = vm.server['icmp_blocked'] == true;
+        disableRoot = (vm.server['ssh'] as Map?)?['permitrootlogin'] == 'no';
+        disablePasswords =
+            (vm.security?['ssh'] as Map?)?['passwordauthentication'] == 'no' &&
+            (vm.security?['ssh'] as Map?)?['kbdinteractiveauthentication'] ==
+                'no';
+        installVless = vm.server['vless'] == true;
+        installSocks = vm.server['socks5'] == true;
+        if (vm.server['awg_configured'] == true) {
+          installAwg = vm.server['awg'] == true;
+        }
+        if (vm.server['awg_port'] is int) {
+          awgPort.text = '${vm.server['awg_port']}';
+        }
+        if (vm.server['vless_port'] is int) {
+          vlessPort.text = '${vm.server['vless_port']}';
+        }
+        if (vm.server['vless_sni'] is String) {
+          realitySni.text = vm.server['vless_sni'] as String;
+        }
+        if (vm.server['socks5_port'] is int) {
+          socksPort.text = '${vm.server['socks5_port']}';
+        }
+        if (vm.server['socks5_access'] is String) {
+          socksAccess = vm.server['socks5_access'] as String;
+        }
+        final currentDeployment = vm.server['awg_deployment'];
+        if (currentDeployment == 'host' || currentDeployment == 'amnezia') {
+          awgDeployment = currentDeployment as String;
+        }
       }
     }
+    if (widget.resumeRunId != null) step = 5;
   }
 
   void _apply(ServerTemplate item, SetupSecrets secrets) {
@@ -112,6 +161,7 @@ class _SetupWizardState extends State<SetupWizard> {
     blockPing = item.blockPing;
     disableRoot = item.disableRoot;
     installAwg = item.installAwg;
+    awgDeployment = item.awgDeployment;
     installSocks = item.installSocks;
     installVless = item.installVless;
     vlessPort.text = '${item.vlessPort}';
@@ -148,7 +198,7 @@ class _SetupWizardState extends State<SetupWizard> {
       port.text = '${vm.ssh!.port}';
       login.text = vm.ssh!.user;
       loginPassword.text = vm.ssh!.password;
-      if (privateKey.text.isEmpty) {
+      if (privateKey.text.isEmpty && widget.resumeRunId == null) {
         privateKey.text = vm.ssh!.privateKey;
         keyPassphrase.text = vm.ssh!.keyPassphrase;
       }
@@ -187,6 +237,7 @@ class _SetupWizardState extends State<SetupWizard> {
       if (mounted) {
         setState(() {
           _apply(answers, secrets);
+          _resetConnectionCredentials();
           selection = value;
         });
       }
@@ -206,6 +257,7 @@ class _SetupWizardState extends State<SetupWizard> {
     blockPing: blockPing,
     disableRoot: disableRoot,
     installAwg: installAwg,
+    awgDeployment: awgDeployment,
     installSocks: installSocks,
     installVless: installVless,
     vlessPort: int.tryParse(vlessPort.text) ?? 0,
@@ -285,6 +337,9 @@ class _SetupWizardState extends State<SetupWizard> {
         return secrets().validate(
           item,
           activeUser: widget.editTemplate ? null : vm.ssh?.user,
+          activeUsesKey: !widget.editTemplate && vm.ssh?.usesKey == true,
+          existingSocks:
+              !widget.editTemplate && vm.server['socks5_configured'] == true,
         );
       } on FormatException {
         return 'Check the DNS address, ports and client names (up to 15 letters, numbers, _ or -; no duplicates).';
@@ -343,7 +398,9 @@ class _SetupWizardState extends State<SetupWizard> {
           return;
         }
       }
-      if (!await vm.saveTemplate(item, protected) || !mounted) return;
+      if (!await vm.saveTemplate(item, protected.forTemplate()) || !mounted) {
+        return;
+      }
       if (widget.editTemplate) {
         Navigator.pop(context, true);
         return;
@@ -353,7 +410,12 @@ class _SetupWizardState extends State<SetupWizard> {
       step = 6;
       localError = '';
     });
-    await vm.provision(item, protected);
+    var resume = widget.resumeRunId;
+    if (resume == null && vm.canResumeSetup) {
+      final draft = await vm.recoveryDraft();
+      if (draft?.matches(item, protected) == true) resume = draft!.runId;
+    }
+    await vm.provision(item, protected, resumeRunId: resume);
   }
 
   @override
@@ -479,11 +541,13 @@ class _SetupWizardState extends State<SetupWizard> {
             (v) => keyLogin = v,
           ),
           if (keyLogin) ...[
+            const SizedBox(height: 12),
             PrivateKeyField(
               controller: privateKey,
               enabled: !busy,
               label: 'SSH private key (paste)',
             ),
+            const SizedBox(height: 16),
             secret(keyPassphrase, 'Key passphrase (optional)'),
           ],
           if (!keyLogin)
@@ -493,6 +557,14 @@ class _SetupWizardState extends State<SetupWizard> {
                   ? 'Default SSH password (optional)'
                   : 'Password',
             ),
+        ],
+        if (!widget.editTemplate) ...[
+          const SizedBox(height: 12),
+          Text(
+            vm.operatingSystem['os'] == null
+                ? 'OS is detected automatically after connecting. Supported: Ubuntu 22.04/24.04 and Debian 12.'
+                : 'Detected OS: ${vm.operatingSystem['os']} ${vm.operatingSystem['version']} · ${vm.operatingSystem['architecture']}',
+          ),
         ],
         if (!widget.editTemplate)
           CheckboxListTile(
@@ -541,11 +613,13 @@ class _SetupWizardState extends State<SetupWizard> {
           (v) => generateKey = v,
         ),
         if (!generateKey && !keyLogin) ...[
+          const SizedBox(height: 12),
           PrivateKeyField(
             controller: privateKey,
             enabled: !busy,
             label: 'SSH private key to install (optional)',
           ),
+          const SizedBox(height: 16),
           secret(keyPassphrase, 'Private key passphrase (optional)'),
         ],
       ],
@@ -606,11 +680,70 @@ class _SetupWizardState extends State<SetupWizard> {
           children: [
             toggle(
               'Install AmneziaWG',
-              'Kernel module only. Existing configurations are preserved.',
+              'Kernel module only. Choose how to manage the new installation. Existing configurations are preserved.',
               installAwg,
               (v) => installAwg = v,
             ),
             if (installAwg) ...[
+              const SizedBox(height: 16),
+              Text(
+                'AmneziaWG deployment',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              RadioGroup<String>(
+                groupValue: awgDeployment,
+                onChanged: (value) {
+                  if (!busy && value != null) {
+                    setState(() => awgDeployment = value);
+                  }
+                },
+                child: Column(
+                  children: [
+                    RadioListTile<String>(
+                      value: 'host',
+                      enabled: !busy,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Host kernel (Ashapp management)'),
+                      subtitle: const Text(
+                        'Runs directly on Linux. Use Ashapp to manage its clients.',
+                      ),
+                    ),
+                    RadioListTile<String>(
+                      value: 'amnezia',
+                      enabled: !busy,
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Shared kernel (Ashapp + AmneziaVPN)'),
+                      subtitle: const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Experimental',
+                            style: TextStyle(
+                              color: Colors.redAccent,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            'May not work with your AmneziaVPN version. Requires an x86_64 Linux VPS; discovery and management in the official app are not guaranteed.',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                awgDeployment == 'amnezia'
+                    ? 'Experimental shared compatibility. Use one manager at a time. Reinstalling or upgrading from AmneziaVPN may replace kernel protection; run Ashapp diagnostics afterward.'
+                    : 'Import vpn:// device access into AmneziaVPN to connect. Its SSH server manager cannot manage this host installation.',
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'This choice applies to a new installation. Existing deployments are preserved.',
+              ),
+              const SizedBox(height: 16),
               field(awgPort, 'AmneziaWG UDP port'),
               field(dns, 'Client DNS (IPv4)'),
               const Text(
@@ -633,6 +766,7 @@ class _SetupWizardState extends State<SetupWizard> {
               ),
               DropdownButtonFormField<String>(
                 initialValue: realityFingerprint,
+                isExpanded: true,
                 decoration: const InputDecoration(
                   labelText: 'Client TLS fingerprint',
                 ),
@@ -671,24 +805,35 @@ class _SetupWizardState extends State<SetupWizard> {
             if (installSocks) ...[
               DropdownButtonFormField<String>(
                 initialValue: socksAccess,
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: 'SOCKS5 access'),
                 items: const [
                   DropdownMenuItem(
                     value: 'public',
-                    child: Text('Public · current behavior'),
+                    child: Text(
+                      'Public · current behavior',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                   DropdownMenuItem(
                     value: 'private',
-                    child: Text('Private · SSH tunnel'),
+                    child: Text(
+                      'Private · SSH tunnel',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                 ],
                 onChanged: busy
                     ? null
                     : (value) => setState(() => socksAccess = value!),
               ),
+              const SizedBox(height: 12),
               const Text(
-                'Public SOCKS5 password authentication is not encrypted by SOCKS5. Private mode requires already-running stable Docker Engine 28+ on the server and publishes to server loopback; start its tunnel in Manage.',
+                'Public SOCKS5 password authentication is not encrypted by SOCKS5. Private mode requires stable Docker Engine 28+ and publishes to server loopback; start its tunnel in Manage. A missing daemon is installed during setup; an existing older daemon must be updated separately.',
               ),
+              const SizedBox(height: 16),
               field(socksPort, 'SOCKS5 TCP port'),
               field(socksUser, 'SOCKS5 username'),
               secret(
@@ -772,8 +917,20 @@ class _SetupWizardState extends State<SetupWizard> {
             _review(
               'Install AmneziaWG kernel',
               installAwg,
-              detail: 'UDP ${awgPort.text} · DNS ${dns.text}',
+              detail:
+                  '${awgDeployment == 'amnezia' ? 'Shared kernel (Ashapp + AmneziaVPN)' : 'Host kernel (Ashapp management)'} · UDP ${awgPort.text} · DNS ${dns.text}',
             ),
+            if (installAwg && awgDeployment == 'amnezia')
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Experimental — shared discovery and management may not work with your AmneziaVPN version.',
+                  style: TextStyle(
+                    color: Colors.redAccent,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
             _review(
               'Install VLESS + Reality + XTLS Vision',
               installVless,
@@ -795,7 +952,7 @@ class _SetupWizardState extends State<SetupWizard> {
             ),
             const SizedBox(height: 16),
             const Text(
-              'Passwords stay masked and are never written into template JSON. Existing VPN and SOCKS5 settings are preserved.',
+              'Passwords stay masked and are never written into template JSON. Existing VPN/SOCKS5 ports and credentials are preserved. Unchecking a service stops it only when Ashapp owns it; security switches restore the owned baseline. Accounts and passwords change only when selected.',
             ),
             if (!widget.editTemplate) ...[
               CheckboxListTile(
@@ -851,6 +1008,8 @@ class _SetupWizardState extends State<SetupWizard> {
               ),
           ],
         ),
+        ActivityConsole(controller: vm, initiallyExpanded: true),
+        const SizedBox(height: 16),
         if (!busy && vm.setupComplete) ...[
           if (vm.ssh != null)
             CredentialsCard(title: 'SSH access', details: vm.ssh!),
@@ -891,37 +1050,34 @@ class _SetupWizardState extends State<SetupWizard> {
               title: 'Your VPN clients',
               children: [
                 for (final client in vm.clients)
-                  ListTile(
-                    title: Text(client['name'].toString()),
-                    subtitle: Text(
-                      vpnSourceLabel(client['source'] as String? ?? 'Host'),
-                    ),
-                    trailing: OutlinedButton(
-                      onPressed: client['can_export'] == false
-                          ? null
-                          : () => exportClient(
-                              context,
-                              vm,
-                              client['name'].toString(),
-                              source: client['source'] as String?,
-                              publicKey: client['public_key'] as String?,
-                            ),
-                      child: const Text('Get configuration'),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(client['name'].toString()),
+                        Text(
+                          vpnSourceLabel(client['source'] as String? ?? 'Host'),
+                        ),
+                        const SizedBox(height: 8),
+                        OutlinedButton(
+                          onPressed: client['can_export'] == false
+                              ? null
+                              : () => exportClient(
+                                  context,
+                                  vm,
+                                  client['name'].toString(),
+                                  source: client['source'] as String?,
+                                  publicKey: client['public_key'] as String?,
+                                ),
+                          child: const Text('Get configuration'),
+                        ),
+                      ],
                     ),
                   ),
               ],
             ),
         ],
-        if (vm.log.isNotEmpty)
-          ExpansionTile(
-            title: const Text('Activity details'),
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: SelectableText(vm.log),
-              ),
-            ],
-          ),
       ],
     ),
   };
@@ -955,7 +1111,17 @@ class _SetupWizardState extends State<SetupWizard> {
             widget.editTemplate
                 ? 'Template · ${name.text.isEmpty ? 'New' : name.text}'
                 : 'Set up a server',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
+          actions: [
+            if (!widget.editTemplate && (vm.connected || vm.log.isNotEmpty))
+              IconButton(
+                tooltip: 'Server activity',
+                onPressed: () => showActivityConsole(context, vm),
+                icon: const Icon(Icons.terminal_outlined),
+              ),
+          ],
         ),
         body: Center(
           child: ConstrainedBox(
@@ -984,6 +1150,13 @@ class _SetupWizardState extends State<SetupWizard> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        if (widget.resumeRunId != null && step < 6)
+                          const Padding(
+                            padding: EdgeInsets.only(bottom: 16),
+                            child: Text(
+                              'Resume the saved plan. Completed password, administrator and SSH-key steps will be kept; services and security are checked again. To change answers, open a new setup wizard.',
+                            ),
+                          ),
                         if (localError.isNotEmpty || vm.error.isNotEmpty)
                           Padding(
                             padding: const EdgeInsets.only(bottom: 16),
@@ -997,6 +1170,8 @@ class _SetupWizardState extends State<SetupWizard> {
                               ),
                             ),
                           ),
+                        if (step == 0 && !widget.editTemplate)
+                          ChangedServerKeyAction(controller: vm),
                         content(),
                       ],
                     ),
@@ -1010,7 +1185,7 @@ class _SetupWizardState extends State<SetupWizard> {
                     spacing: 8,
                     overflowSpacing: 8,
                     children: [
-                      if (step > 0 && step < 6)
+                      if (step > 0 && step < 6 && widget.resumeRunId == null)
                         OutlinedButton(
                           onPressed: busy
                               ? null

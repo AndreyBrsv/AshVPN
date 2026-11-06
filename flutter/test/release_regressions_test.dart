@@ -150,7 +150,9 @@ void main() {
     expect(a.clients.single['name'], 'phone');
     expect(b.clients, isEmpty);
     h.servers['203.0.113.20']!.failAction = 'status';
-    expect(await b.refresh(), isFalse);
+    expect(await b.refresh(), isTrue);
+    expect(b.inspectionWarnings, isNotEmpty);
+    expect(a.inspectionWarnings, isEmpty);
     expect(a.error, isEmpty);
     expect(await b.disconnect(), isTrue);
     expect(a.connected, isTrue);

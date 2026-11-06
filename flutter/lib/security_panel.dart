@@ -76,7 +76,7 @@ class _SecurityPanelState extends State<SecurityPanel> {
             'Preserved TCP ports: ${ports['tcp']}\nPreserved UDP ports: ${ports['udp']}\n'
             '${plan['notice']}\n\n'
             'Turning protection off removes Ashapp settings. External policy may remain active. '
-            'Enabling root/password access makes those SSH login methods available again.',
+            'Turning SSH restrictions off restores the original policy. The server’s original policy may still restrict those login methods.',
       )) {
         return;
       }
@@ -135,13 +135,31 @@ class _SecurityPanelState extends State<SecurityPanel> {
           icon: const Icon(Icons.health_and_safety_outlined),
           label: const Text('Run diagnostics'),
         ),
-        if (vm.securityError.isNotEmpty) Text(vm.securityError),
+        if (vm.securityError.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(vm.securityError),
+          ),
+        if (data?['last_failure'] is Map)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Text(
+              'Last recorded failure · ${data!['last_failure']['action']}: ${data['last_failure']['detail']}',
+            ),
+          ),
         if (data?['pending'] == true)
-          const Text(
-            'A security change is pending confirmation or rollback. Do not close recovery access.',
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'A security change is pending confirmation or rollback. Do not close recovery access.',
+            ),
           ),
         for (final warning in data?['warnings'] as List? ?? [])
-          Text(warning.toString()),
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(warning.toString()),
+          ),
+        const SizedBox(height: 8),
         option(
           'fail2ban',
           'Protect SSH with Fail2ban',
@@ -172,35 +190,43 @@ class _SecurityPanelState extends State<SecurityPanel> {
         option(
           'disable_root',
           'Disable root SSH login',
-          'Applies to all root SSH login methods. Turning off explicitly permits root SSH again.',
+          'Applies to all root SSH login methods. Turning off restores the original root-login policy, which may still restrict password access.',
           ssh == null ? null : ssh['permitrootlogin'] == 'no',
         ),
         option(
           'disable_passwords',
           'Disable password SSH login',
-          'All users. Requires a verified SSH key saved in the OS vault. Turning off allows password login again.',
+          'All users. Requires a verified SSH key saved in the OS vault. Turning off restores the original password-login policy.',
           ssh == null
               ? null
               : ssh['passwordauthentication'] == 'no' &&
                     ssh['kbdinteractiveauthentication'] == 'no',
         ),
+        const SizedBox(height: 12),
         FilledButton(
           onPressed: busy || changes.isEmpty ? null : apply,
           child: const Text('Review and apply changes'),
         ),
+        const SizedBox(height: 12),
         if (data?['listeners'] != null)
           Text(
             'Listening ports (reachability depends on firewall): ${data!['listeners']}',
           ),
         if (data?['docker_ports'] != null &&
             (data!['docker_ports'] as List).isNotEmpty)
-          Text('Docker published ports: ${data['docker_ports']}'),
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text('Docker published ports: ${data['docker_ports']}'),
+          ),
         if (data?['reboot_required'] == true)
-          const Text(
-            'A server reboot is required. Ashapp will not reboot automatically.',
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'A server reboot is required. Ashapp will not reboot automatically.',
+            ),
           ),
         if ((fail2ban?['banned'] as List? ?? []).isNotEmpty) ...[
-          const Divider(),
+          const Divider(height: 32),
           const Text('Blocked by the Ashapp SSH jail'),
           for (final address in fail2ban!['banned'] as List)
             ListTile(
@@ -223,25 +249,30 @@ class _SecurityPanelState extends State<SecurityPanel> {
               ),
             ),
         ],
-        const Divider(),
-        const Text('SSH key access'),
+        const Divider(height: 32),
+        Text('SSH key access', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
         const Text(
           'A generated key is unique to this server. Imported keys and passphrases stay in the OS vault.',
         ),
+        const SizedBox(height: 12),
         OutlinedButton(
           onPressed: busy ? null : () => installKey(true),
           child: const Text('Generate and install SSH key'),
         ),
+        const SizedBox(height: 16),
         PrivateKeyField(
           controller: privateKey,
           enabled: !busy,
           label: 'Import SSH private key (paste)',
         ),
+        const SizedBox(height: 12),
         SecretField(
           controller: passphrase,
           label: 'Key passphrase (optional)',
           enabled: !busy,
         ),
+        const SizedBox(height: 12),
         OutlinedButton(
           onPressed: busy ? null : () => installKey(false),
           child: const Text('Import and verify SSH key'),
