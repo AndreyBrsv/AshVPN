@@ -20,7 +20,9 @@ class LifecycleTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # macOS exposes TMPDIR through /var, a system symlink to /private/var.
+        # Canonicalize the fixture, keeping production link rejection intact.
+        self.root = Path(temporary.name).resolve()
         self.security_state = self.root / 'security'; self.security_state.mkdir()
         self.server = {'awg': False, 'kernel': False, 'userspace': False, 'socks5': False,
                        'ssh': {'permitrootlogin': 'prohibit-password', 'passwordauthentication': 'yes'},

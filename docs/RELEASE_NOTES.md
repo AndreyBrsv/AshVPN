@@ -1,4 +1,6 @@
-Ashapp v0.0.12
+Ashapp v0.0.13
+
+Fix macOS release validation by resolving the system temporary-directory alias in the isolated lifecycle test fixture. The server?s protected-path checks remain unchanged. Application behavior is the same as the reviewed v0.0.12 source; this patch rebuilds that functionality for each platform without replacing the earlier Windows release or its source identity.
 
 Set up a VPS from reusable answers, then inspect and manage the actual result. This release adds a root-private server installation ledger, explicit recovery of interrupted setup using protected local answers, deeper diagnostic checks and a reviewed reset of positively identified Ashapp-owned services/settings. Reset retains administrator accounts, current passwords, packages and unrelated services; it is not an OS reinstall.
 
