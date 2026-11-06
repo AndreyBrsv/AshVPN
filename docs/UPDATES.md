@@ -4,7 +4,7 @@ Introduced in **v0.0.4**. Published v0.0.3 does not contain it. The first update
 
 Background maintenance was introduced in v0.0.8. Published v0.0.7 and earlier open the interactive system installer. Starting with v0.0.11, Windows and each macOS target can publish independently after their own checks; source changes alone do not establish publication.
 
-The next coordinated release is **v0.0.12**. Its source, Windows x64 and both macOS targets must use the same new version commit; earlier releases and their assets remain unchanged. Platform readiness is established by the uploaded assets and checksum file, not by this document. The installation journal, diagnostics and reset features affect remote VPS management; local app uninstall never runs a remote reset.
+The coordinated maintenance release is **v0.0.14**, following the published v0.0.13 baseline. Its source, Windows x64 and both macOS targets must use the same new version commit; earlier releases and assets remain unchanged. Platform readiness is established by uploaded assets and the corresponding checksum file, not by this document. This maintenance release corrects existing-server Manage rendering, reviewed firewall port updates and SOCKS5 state after external edits. Remote management fixes do not cause a remote reset during local application uninstall.
 
 ## User flow
 

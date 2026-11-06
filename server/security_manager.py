@@ -255,19 +255,36 @@ def configured_ports():
 def docker_ports():
     if not shutil.which('docker'):
         return []
-    ids = run(['docker', 'ps', '-q']).stdout.split()
+    # Include configured, stopped containers: enabling protection while a VPN
+    # is stopped must not make its next normal start unreachable. Docker does
+    # not populate NetworkSettings.Ports until the container is running.
+    ids = run(['docker', 'ps', '-a', '-q']).stdout.split()
     if not ids:
         return []
     rows = json.loads(run(['docker', 'inspect', '--type', 'container', *ids]).stdout)
-    ports = []
+    ports = set()
     for row in rows:
-        for target, bindings in (row.get('NetworkSettings', {}).get('Ports') or {}).items():
+        configured = row.get('HostConfig', {}).get('PortBindings') or {}
+        runtime = row.get('NetworkSettings', {}).get('Ports') or {}
+        running = row.get('State', {}).get('Running') is True
+        publications = {**configured, **runtime} if running else configured
+        for target, bindings in publications.items():
+            # A stopped container may retain a null runtime entry rather than
+            # omit it entirely; keep its explicit persistent publication.
+            bindings = bindings or configured.get(target)
             for binding in bindings or []:
                 address = binding.get('HostIp', '')
                 if address and ipaddress.ip_address(address).is_loopback:
                     continue
-                ports.append({'protocol': target.split('/')[-1], 'port': int(binding['HostPort'])})
-    return sorted(ports, key=lambda row: (row['protocol'], row['port']))
+                value = binding.get('HostPort', '')
+                if not value:
+                    raise ValueError('A Docker publication has no assigned host port; start that container before reviewing firewall protection.')
+                port = int(value)
+                protocol = target.split('/')[-1]
+                if protocol not in ('tcp', 'udp') or not 1 <= port <= 65535:
+                    raise ValueError('A Docker publication uses an unsupported protocol or host port.')
+                ports.add((protocol, port))
+    return [{'protocol': protocol, 'port': port} for protocol, port in sorted(ports)]
 
 
 def active(unit):
@@ -335,10 +352,13 @@ def diagnostics():
         result['warnings'].append('The previous security failure marker could not be read.')
     try:
         result['listeners'] = listeners()
-        result['docker_ports'] = docker_ports()
     except (ValueError, RuntimeError, OSError, KeyError, TypeError, subprocess.SubprocessError):
         result['listeners'] = None
+    try:
+        result['docker_ports'] = docker_ports()
+    except (ValueError, RuntimeError, OSError, KeyError, TypeError, subprocess.SubprocessError):
         result['docker_ports'] = None
+        result['warnings'].append('Docker publications could not be verified. Firewall reachability is unknown.')
     try:
         if FILES['firewall'].exists():
             result['firewall']['ports'] = read_json(FILES['firewall'])
@@ -424,7 +444,9 @@ def firewall_status(config, published):
         configured = {(item['protocol'], item['port']) for item in config['docker_ports']}
         docker = docker and all((item['protocol'], item['port']) in configured for item in published)
     saved = configured_ports()
-    listeners_allowed = all(set(saved[protocol]) <= set(config[protocol]) for protocol in ('tcp', 'udp'))
+    listeners_allowed = all((set(saved[protocol]) |
+                            {item['port'] for item in published or [] if item['protocol'] == protocol})
+                           <= set(config[protocol]) for protocol in ('tcp', 'udp'))
     return {'enabled': host and docker and listeners_allowed if published is not None else None,
             'configured_ports_verified': listeners_allowed,
             'host_verified': host, 'docker_verified': docker if published is not None else None}
@@ -453,7 +475,22 @@ def preview(changes):
     for protocol in ('tcp', 'udp'):
         ports[protocol] = sorted(set(ports[protocol]) | set(saved_ports[protocol]))
     ports['tcp'] = sorted(set(ports['tcp']) | set(ssh_ports()))
-    published = docker_ports()
+    publication_notice = ''
+    try:
+        published = docker_ports()
+    except (ValueError, RuntimeError, OSError, KeyError, TypeError, subprocess.SubprocessError):
+        if changes.get('firewall'):
+            raise
+        # Removing our filter must remain possible during a Docker outage or
+        # with an unallocated random port. Do not claim an empty/verified set.
+        published = None
+        publication_notice = ' Docker publications could not be verified; their status is unknown. This operation does not enable firewall protection.'
+    # Docker's userland proxy can terminate traffic in INPUT rather than
+    # FORWARD/DOCKER-USER (notably cross-family mappings). Keep the reviewed
+    # public host port reachable on either path, including stopped containers.
+    for protocol in ('tcp', 'udp'):
+        ports[protocol] = sorted(set(ports[protocol]) | {item['port'] for item in published or []
+                                                     if item['protocol'] == protocol})
     if changes.get('firewall'):
         ufw = run(['ufw', 'status'], check=False).stdout if shutil.which('ufw') else ''
         if ufw.startswith('Status: active') or active('firewalld'):
@@ -478,7 +515,7 @@ def preview(changes):
                 'docker_ports': published, 'ssh_ports': ssh_ports()}
     encoded = json.dumps(evidence, sort_keys=True, separators=(',', ':'))
     return {'digest': hashlib.sha256(encoded.encode()).hexdigest(), **evidence,
-            'notice': 'Existing listening ports and Docker publications are preserved. Only Ashapp-owned rules are removed when protection is disabled. Network changes roll back unless a fresh SSH connection confirms them within 180 seconds.'}
+            'notice': 'Existing listening ports and Docker publications are preserved. Only Ashapp-owned rules are removed when protection is disabled. Network changes roll back unless a fresh SSH connection confirms them within 180 seconds.' + publication_notice}
 
 
 def firewall_reconcile():

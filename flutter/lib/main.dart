@@ -472,7 +472,7 @@ class _HomePageState extends State<HomePage> {
     if (exists && !unsupportedPrivate && !await target.readSocks()) return;
     if (!mounted) return;
     final result = await values(
-      exists ? 'Replace SOCKS5 credentials' : 'Install SOCKS5',
+      exists ? 'Replace SOCKS5 proxy' : 'Install SOCKS5',
       [
         InputSpec(
           'SOCKS5 TCP port',
@@ -491,7 +491,7 @@ class _HomePageState extends State<HomePage> {
       ],
       action: exists ? 'Replace and verify' : 'Install',
       description: exists
-          ? 'Existing SOCKS5 connections will be interrupted. Clients must use the new credentials afterwards.'
+          ? 'Recreate the existing server container under the same name, including a proxy installed by AmneziaVPN. Existing SOCKS5 connections will be interrupted. AmneziaVPN keeps its own cached profile; update its saved credentials afterwards.'
           : 'Docker will be installed if needed. Use letters, numbers or underscores; the password needs at least 8 characters.',
     );
     if (result != null) {
@@ -874,6 +874,25 @@ class _HomePageState extends State<HomePage> {
           subtitle:
               '${socks ? 'Running' : 'Stopped or not installed'}${vm.server['socks5_port'] != null ? ' · TCP ${vm.server['socks5_port']}' : ''}',
           children: [
+            if (vm.server['socks5_source'] != null) ...[
+              Text('Server service: ${vm.server['socks5_source']}'),
+              Text(
+                vm.server['socks5_owned'] == true
+                    ? 'Created by Ashapp with the AmneziaVPN service name.'
+                    : 'Existing server proxy. Ashapp uses this service instead of installing a second one.',
+              ),
+              if (vm.server['socks5_port'] != null)
+                Text(
+                  vm.server['socks5_access'] == 'private'
+                      ? 'Server endpoint: 127.0.0.1:${vm.server['socks5_port']} (on the VPS only)'
+                      : 'Server endpoint: ${vm.ssh!.host}:${vm.server['socks5_port']}',
+                ),
+              const SizedBox(height: 12),
+            ],
+            if (vm.server['socks5_error'] != null) ...[
+              Text(vm.server['socks5_error'].toString()),
+              const SizedBox(height: 12),
+            ],
             if (vm.server['socks5_access_warning'] != null) ...[
               Text(vm.server['socks5_access_warning'].toString()),
               const SizedBox(height: 12),
@@ -902,7 +921,9 @@ class _HomePageState extends State<HomePage> {
               ),
               const SizedBox(height: 12),
               if (vm.socksTunnel != null) ...[
-                Text('Local proxy: 127.0.0.1:${vm.socksTunnel!.port}'),
+                Text(
+                  'Local SSH tunnel to this proxy: 127.0.0.1:${vm.socksTunnel!.port}',
+                ),
                 const SizedBox(height: 12),
               ],
             ],
@@ -914,7 +935,7 @@ class _HomePageState extends State<HomePage> {
               onPressed: busy ? null : socksSettings,
               child: Text(
                 vm.server['socks5_configured'] == true || socks
-                    ? 'Manage SOCKS5 credentials'
+                    ? 'Manage SOCKS5 proxy'
                     : 'Install SOCKS5',
               ),
             ),

@@ -87,6 +87,9 @@ class _ServerInstallationPanelState extends State<ServerInstallationPanel> {
           ),
         if (steps.isNotEmpty)
           ExpansionTile(
+            // Expansion state and the enclosing page's numeric scroll offset
+            // must use different PageStorage entries, scoped to this server.
+            key: PageStorageKey(('installation-steps', vm)),
             tilePadding: EdgeInsets.zero,
             title: const Text('Recorded setup steps'),
             children: [
@@ -105,6 +108,7 @@ class _ServerInstallationPanelState extends State<ServerInstallationPanel> {
           ),
         if (events.isNotEmpty)
           ExpansionTile(
+            key: PageStorageKey(('installation-events', vm)),
             tilePadding: EdgeInsets.zero,
             title: const Text('Recent server activity'),
             subtitle: const Text(

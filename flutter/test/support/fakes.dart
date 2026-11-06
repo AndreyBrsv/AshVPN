@@ -279,6 +279,7 @@ class FakeBackend extends Fake implements RemoteBackend {
       case 'security-preview':
         return {
           'digest': 'test-plan',
+          'docker_ports': <dynamic>[],
           'ports': {
             'tcp': [22],
             'udp': [],
@@ -295,7 +296,7 @@ class FakeBackend extends Fake implements RemoteBackend {
           if (changes.containsKey(feature)) {
             server.security[feature] = {
               'enabled': changes[feature],
-              'managed': true,
+              'managed': feature != 'firewall' || changes[feature] == true,
               'banned': <String>[],
             };
           }
@@ -433,6 +434,10 @@ class FakeBackend extends Fake implements RemoteBackend {
           'user': server.socksUser,
           'password': server.socksPassword,
           'access': server.state['socks5_access'] ?? 'public',
+          if (server.state['socks5_container_id'] != null)
+            'container_id': server.state['socks5_container_id'],
+          if (server.state['socks5_source'] != null)
+            'source': server.state['socks5_source'],
         };
       case 'socks-control':
         server.state['socks5'] = fields[0] != 'stop';

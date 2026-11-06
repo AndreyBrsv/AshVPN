@@ -60,9 +60,11 @@ class _SecurityPanelState extends State<SecurityPanel> {
               }),
       );
 
-  Future<void> apply() async {
+  Future<void> apply({bool refreshFirewall = false}) async {
     final target = vm;
-    final selected = Map<String, bool>.of(changes);
+    final selected = refreshFirewall
+        ? <String, bool>{'firewall': true}
+        : Map<String, bool>.of(changes);
     setState(() => localBusy = true);
     try {
       final plan = await target.previewSecurity(selected);
@@ -70,13 +72,14 @@ class _SecurityPanelState extends State<SecurityPanel> {
       final ports = plan['ports'] as Map? ?? {};
       if (!await confirmAction(
         context,
-        'Apply security changes?',
+        refreshFirewall ? 'Refresh firewall ports?' : 'Apply security changes?',
         'Server ${target.ssh!.host}:${target.ssh!.port}\n'
-            '${selected.entries.map((e) => '${e.key}: ${e.value ? 'On' : 'Off'}').join('\n')}\n\n'
-            'Preserved TCP ports: ${ports['tcp']}\nPreserved UDP ports: ${ports['udp']}\n'
-            '${plan['notice']}\n\n'
-            'Turning protection off removes Ashapp settings. External policy may remain active. '
-            'Turning SSH restrictions off restores the original policy. The server’s original policy may still restrict those login methods.',
+        '${selected.entries.map((e) => '${e.key}: ${e.value ? 'On' : 'Off'}').join('\n')}\n\n'
+        'Preserved TCP ports: ${ports['tcp']}\nPreserved UDP ports: ${ports['udp']}\n'
+        'Docker publications: ${plan['docker_ports'] ?? 'Unknown; firewall protection is not being enabled'}\n'
+        '${plan['notice']}\n\n'
+        'Turning protection off removes Ashapp settings. External policy may remain active. '
+        'Turning SSH restrictions off restores the original policy. The server’s original policy may still restrict those login methods.',
       )) {
         return;
       }
@@ -171,8 +174,36 @@ class _SecurityPanelState extends State<SecurityPanel> {
           'firewall',
           'Firewall protection',
           'Preserve existing ports and policy. Disabling removes only Ashapp firewall rules.',
-          firewall?['enabled'] as bool?,
+          firewall?['managed'] == true ? true : firewall?['enabled'] as bool?,
         ),
+        if (firewall?['managed'] == true) ...[
+          Text(
+            'Effective firewall protection: ${firewall?['enabled'] == true
+                ? 'Verified'
+                : firewall?['enabled'] == false
+                ? 'Needs review'
+                : 'Unknown'}. The checkbox controls the saved Ashapp policy.',
+          ),
+          if (firewall?['error'] != null) Text(firewall!['error'].toString()),
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text(
+              'After adding or changing a protocol in AmneziaVPN, review and refresh the firewall ports here. A successful SSH check does not verify VPN traffic.',
+            ),
+          ),
+          OutlinedButton.icon(
+            onPressed: busy || changes.isNotEmpty
+                ? null
+                : () => apply(refreshFirewall: true),
+            icon: const Icon(Icons.refresh),
+            label: const Text('Refresh firewall ports'),
+          ),
+          if (changes.isNotEmpty)
+            const Text(
+              'Apply pending security choices before refreshing ports.',
+            ),
+          const SizedBox(height: 12),
+        ],
         option(
           'automatic_updates',
           'Automatic security updates',

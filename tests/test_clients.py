@@ -74,7 +74,7 @@ class ClientTests(unittest.TestCase):
         return subprocess.CompletedProcess(args, 1 if args[0] != 'docker' else 0, '', '')
 
     def test_unsupported_private_details_and_activation_are_refused_but_stop_and_public_remain(self):
-        self.socks_container = {'HostConfig': {'PortBindings': {'1080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '1080'}]}},
+        self.socks_container = {'Id': 'a' * 64, 'HostConfig': {'PortBindings': {'1080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '1080'}]}},
                                 'NetworkSettings': {'Ports': {}}, 'State': {'Running': False}}
         self.run.side_effect = self.socks_commands
         with self.assertRaisesRegex(RuntimeError, 'Docker Engine 28'):
@@ -98,7 +98,7 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(clients.service_control('socks', 'start')['ok'])
 
     def test_unsupported_private_status_preserves_other_protocols_and_stopped_bindings(self):
-        self.socks_container = {'HostConfig': {'PortBindings': {'1080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '1080'}]}},
+        self.socks_container = {'Id': 'a' * 64, 'HostConfig': {'PortBindings': {'1080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '1080'}]}},
                                 'NetworkSettings': {'Ports': {}}, 'State': {'Running': False}}
         def status_run(args, data=None, check=True):
             if args[:2] == ['sh', '-c']:

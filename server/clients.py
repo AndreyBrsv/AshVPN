@@ -403,7 +403,12 @@ def status():
                     obj = values[0]
                     if not isinstance(obj['State']['Running'], bool):
                         raise ValueError()
+                    identity = obj.get('Id', '')
+                    if not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{64}', identity):
+                        raise ValueError()
                     result[field] = obj['State']['Running']
+                    result['socks5_source'] = SOCKS_NAME
+                    result['socks5_container_id'] = identity
                     labels = (obj.get('Config') or {}).get('Labels') or {}
                     result['socks5_owned'] = labels.get('io.ashapp.managed') == 'socks5-v1'
                     bindings = [binding for key, entries in socks_publications(obj).items()
@@ -766,20 +771,32 @@ def require_private_socks_engine():
 
 
 def socks_publications(inspected):
-    # HostConfig survives container stop; runtime Ports can be empty then.
-    return (inspected.get('HostConfig', {}).get('PortBindings')
-            or inspected.get('NetworkSettings', {}).get('Ports') or {})
+    # Requested ports may be empty or differ from the allocated runtime port.
+    # A stopped container has no runtime publication; inspect its saved binds.
+    if inspected.get('State', {}).get('Running') is True:
+        return inspected.get('NetworkSettings', {}).get('Ports') or {}
+    return inspected.get('HostConfig', {}).get('PortBindings') or {}
+
+
+def inspect_socks():
+    rows = json.loads(run(['docker', 'inspect', '--type', 'container', SOCKS_NAME]).stdout)
+    if (not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+            or not isinstance(rows[0].get('Id'), str)
+            or not re.fullmatch(r'[a-f0-9]{64}', rows[0]['Id'])):
+        raise RuntimeError('The SOCKS5 container identity could not be verified. Refresh before retrying.')
+    return rows[0]
 
 
 def socks_info():
-    proc = run(["docker", "exec", SOCKS_NAME, "cat", SOCKS_CONFIG], check=False)
+    inspected = inspect_socks()
+    identity = inspected['Id']
+    proc = run(["docker", "exec", identity, "cat", SOCKS_CONFIG], check=False)
     if proc.returncode:
         raise RuntimeError("Could not read the SOCKS5 configuration.")
     match = re.search(r"(?m)^users ([A-Za-z0-9_]+):CL:([A-Za-z0-9_]+)\s*$", proc.stdout)
     port = re.search(r"(?m)^socks -p([0-9]+)\s*$", proc.stdout)
     if not match or not port:
         raise RuntimeError("The SOCKS5 configuration format is unsupported.")
-    inspected = json.loads(run(['docker', 'inspect', '--type', 'container', SOCKS_NAME]).stdout)[0]
     bindings = socks_publications(inspected).get(port.group(1) + '/tcp') or []
     ports = {int(item['HostPort']) for item in bindings}
     if len(ports) != 1 or not 1 <= next(iter(ports)) <= 65535:
@@ -787,8 +804,13 @@ def socks_info():
     private = all(ipaddress.ip_address(item.get('HostIp') or '0.0.0.0').is_loopback for item in bindings)
     if private:
         require_private_socks_engine()
+    current = inspect_socks()
+    if (current['Id'] != identity
+            or current.get('State', {}).get('Running') != inspected.get('State', {}).get('Running')
+            or socks_publications(current) != socks_publications(inspected)):
+        raise RuntimeError('The SOCKS5 container or publication changed while reading access. Refresh before retrying.')
     return {"user": match.group(1), "password": match.group(2), "port": next(iter(ports)),
-            'access': 'private' if private else 'public'}
+            'access': 'private' if private else 'public', 'source': SOCKS_NAME, 'container_id': identity}
 
 
 def recv_exact(sock, size):

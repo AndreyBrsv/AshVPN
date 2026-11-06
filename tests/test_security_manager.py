@@ -105,6 +105,156 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(list(self.state.iterdir()), [])
         self.assertFalse(any('-A' in command or '-F' in command for command in self.commands))
 
+    def docker_fixture(self, rows):
+        def command(args, check=True, data=None):
+            if args == ['docker', 'ps', '-a', '-q']:
+                return SimpleNamespace(returncode=0, stdout='container-a\ncontainer-b\n')
+            if args == ['docker', 'inspect', '--type', 'container', 'container-a', 'container-b']:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(rows))
+            return self.fake_run(args, check, data)
+        return command
+
+    def test_docker_publications_include_stopped_fixed_ports_and_exclude_private_bindings(self):
+        rows = [
+            {'HostConfig': {'PortBindings': {
+                '51820/udp': [{'HostIp': '0.0.0.0', 'HostPort': '1194'}],
+                '1080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '1080'}]}},
+             'NetworkSettings': {'Ports': {'51820/udp': None}}, 'State': {'Running': False}},
+            {'HostConfig': {'PortBindings': {'443/tcp': [{'HostIp': '', 'HostPort': ''}]}},
+             'NetworkSettings': {'Ports': {'443/tcp': [
+                 {'HostIp': '0.0.0.0', 'HostPort': '32443'},
+                 {'HostIp': '::', 'HostPort': '32443'}]}}, 'State': {'Running': True}},
+        ]
+        with patch.object(security.shutil, 'which', return_value='/usr/bin/docker'), \
+                patch.object(security, 'run', self.docker_fixture(rows)):
+            self.assertEqual(security.docker_ports(), [
+                {'protocol': 'tcp', 'port': 32443}, {'protocol': 'udp', 'port': 1194}])
+            self.chains['iptables', 'DOCKER-USER'] = []
+            plan = security.preview({'firewall': True})
+        self.assertIn(1194, plan['ports']['udp'])
+        self.assertIn(32443, plan['ports']['tcp'])
+        self.assertNotIn(1080, plan['ports']['tcp'])
+        self.assertFalse(any('-A' in command or '-F' in command for command in self.commands))
+
+    def test_unassigned_stopped_random_docker_port_requires_review_before_firewall_mutation(self):
+        rows = [{'HostConfig': {'PortBindings': {'443/tcp': [{'HostIp': '', 'HostPort': ''}]}},
+                 'NetworkSettings': {'Ports': None}}]
+        with patch.object(security.shutil, 'which', return_value='/usr/bin/docker'), \
+                patch.object(security, 'run', self.docker_fixture(rows)), \
+                self.assertRaisesRegex(ValueError, 'no assigned host port'):
+            security.preview({'firewall': True})
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertFalse(any('-A' in command or '-F' in command for command in self.commands))
+
+    def test_unassigned_stopped_random_port_does_not_prevent_disabling_protection(self):
+        rows = [{'HostConfig': {'PortBindings': {'443/tcp': [{'HostIp': '', 'HostPort': ''}]}},
+                 'NetworkSettings': {'Ports': None}}]
+        with patch.object(security.shutil, 'which', return_value='/usr/bin/docker'), \
+                patch.object(security, 'run', self.docker_fixture(rows)):
+            plan = security.preview({'firewall': False})
+        self.assertIsNone(plan['docker_ports'])
+        self.assertIn('unknown', plan['notice'])
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertFalse(any('-A' in command or '-F' in command for command in self.commands))
+
+    def test_stopped_random_publication_cannot_reuse_a_stale_runtime_port(self):
+        rows = [{'State': {'Running': False},
+                 'HostConfig': {'PortBindings': {'443/tcp': [{'HostIp': '', 'HostPort': ''}]}},
+                 'NetworkSettings': {'Ports': {'443/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '32443'}]}}}]
+        with patch.object(security.shutil, 'which', return_value='/usr/bin/docker'), \
+                patch.object(security, 'run', self.docker_fixture(rows)), \
+                self.assertRaisesRegex(ValueError, 'no assigned host port'):
+            security.preview({'firewall': True})
+        self.assertEqual(list(self.state.iterdir()), [])
+
+    def test_docker_inspection_failure_does_not_prevent_reviewed_firewall_removal(self):
+        staged = self.stage({'firewall': True}); self.confirm(staged['token'])
+
+        def unavailable(args, check=True, data=None):
+            if args[:2] == ['docker', 'ps']:
+                raise security.SecurityCommandError('Docker inspection is unavailable.')
+            return self.fake_run(args, check, data)
+
+        with patch.object(security.shutil, 'which', return_value='/usr/bin/docker'), \
+                patch.object(security, 'run', unavailable):
+            plan = security.preview({'firewall': False})
+            self.assertIsNone(plan['docker_ports'])
+            staged = security.stage({'firewall': False}, plan['digest'])
+            self.assertTrue(self.confirm(staged['token'])['confirmed'])
+            status = security.diagnostics()
+        self.assertIsNone(status['docker_ports'])
+        self.assertIsNotNone(status['listeners'])
+        self.assertFalse(self.files['firewall'].exists())
+        self.assertNotIn(('iptables', 'ASHAPP-IN'), self.chains)
+
+    def test_unknown_docker_evidence_never_bypasses_ownership_or_ssh_validation(self):
+        self.files['firewall'].write_text('foreign-policy')
+        with patch.object(security, 'docker_ports', side_effect=security.SecurityCommandError('unavailable')), \
+                self.assertRaisesRegex(ValueError, 'unrecognized'):
+            security.preview({'firewall': False})
+        self.files['firewall'].unlink()
+        self.main.write_text('Match Address 198.51.100.10\n PermitRootLogin yes\n')
+        with patch.object(security, 'docker_ports', side_effect=security.SecurityCommandError('unavailable')), \
+                self.assertRaisesRegex(ValueError, 'Conditional'):
+            security.preview({'disable_root': False})
+
+    @staticmethod
+    def packet_verdict(rules, *, protocol, port, states=('NEW',), original_port=None, interface='eth0'):
+        """Small packet fixture for the matches used by the owned chains.
+
+        RETURN deliberately does not mean ACCEPT: the caller's foreign rules
+        and Docker isolation/publication policy still decide the final result.
+        """
+        for rule in rules:
+            matches = {'-p': protocol, '--dport': str(port), '-i': interface,
+                       '--ctorigdstport': str(original_port if original_port is not None else port)}
+            if any(flag in rule and rule[rule.index(flag) + 1] != value for flag, value in matches.items()):
+                continue
+            if '--ctstate' in rule and not set(rule[rule.index('--ctstate') + 1].split(',')) & set(states):
+                continue
+            return rule[rule.index('-j') + 1]
+        return None
+
+    def test_firewall_keeps_reviewed_awg_proxy_and_dnat_paths_dns_egress_and_return_traffic(self):
+        publications = [{'protocol': 'udp', 'port': 1194}, {'protocol': 'tcp', 'port': 32443}]
+        self.chains['iptables', 'DOCKER-USER'] = []
+        with patch.object(security, 'docker_ports', return_value=publications):
+            staged = self.stage({'firewall': True}); self.confirm(staged['token'])
+        config = security.read_json(self.files['firewall'])
+        host = security.host_rules(config, 'iptables')
+        forwarded = security.docker_rules(config)
+        cases = [
+            (host, {'protocol': 'udp', 'port': 1194}, 'ACCEPT'),  # host proxy / stopped VPN restart
+            (host, {'protocol': 'tcp', 'port': 32443}, 'ACCEPT'),  # cross-family userland proxy
+            (forwarded, {'protocol': 'udp', 'port': 51820, 'original_port': 1194,
+                         'states': ('NEW', 'DNAT')}, 'RETURN'),  # mapped host port, not container port
+            (forwarded, {'protocol': 'udp', 'port': 53, 'interface': 'br-amnezia'}, 'RETURN'),
+            (forwarded, {'protocol': 'tcp', 'port': 443, 'interface': 'docker0'}, 'RETURN'),
+            (forwarded, {'protocol': 'udp', 'port': 40000, 'states': ('ESTABLISHED', 'DNAT')}, 'RETURN'),
+            (host, {'protocol': 'udp', 'port': 40000, 'states': ('ESTABLISHED',)}, 'ACCEPT'),
+            (forwarded, {'protocol': 'udp', 'port': 51820, 'original_port': 9999,
+                         'states': ('NEW', 'DNAT')}, 'DROP'),
+            (forwarded, {'protocol': 'tcp', 'port': 1080, 'states': ('NEW', 'DNAT')}, 'DROP'),
+            (host, {'protocol': 'tcp', 'port': 1080}, 'DROP'),
+            (host, {'protocol': 'tcp', 'port': 1194}, 'DROP'),  # TCP/UDP namespaces remain separate
+        ]
+        for rules, packet, expected in cases:
+            with self.subTest(packet=packet, expected=expected):
+                self.assertEqual(self.packet_verdict(rules, **packet), expected)
+
+    def test_diagnostics_detects_missing_host_proxy_allow_for_reviewed_docker_port(self):
+        publications = [{'protocol': 'udp', 'port': 1194}]
+        self.chains['iptables', 'DOCKER-USER'] = []
+        with patch.object(security, 'docker_ports', return_value=publications):
+            staged = self.stage({'firewall': True}); self.confirm(staged['token'])
+        config = security.read_json(self.files['firewall'])
+        self.assertTrue(security.firewall_status(config, publications)['enabled'])
+        config['udp'].remove(1194)
+        self.chains['iptables', 'ASHAPP-IN'] = security.host_rules(config, 'iptables')
+        self.chains['ip6tables', 'ASHAPP-IN'] = security.host_rules(config, 'ip6tables')
+        self.assertFalse(security.firewall_status(config, publications)['enabled'])
+        self.assertFalse(security.firewall_status(config, publications)['configured_ports_verified'])
+
     def test_listener_interface_suffixes_preserve_dhcp_but_exclude_loopback(self):
         def scoped_run(args, check=True, data=None):
             if args[:3] == ['ss', '-H', '-lntu']:

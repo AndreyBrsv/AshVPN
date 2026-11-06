@@ -85,6 +85,8 @@ class WorkspaceController extends ChangeNotifier {
   String securityError = '';
   bool securityPending = false;
   SocksTunnel? socksTunnel;
+  ({String? containerId, String? source, int port})? _socksReadTarget,
+      _socksTunnelTarget;
   Timer? _progressTimer;
   final _operationClock = Stopwatch();
   Duration get elapsed => _operationClock.elapsed;
@@ -512,6 +514,10 @@ class WorkspaceController extends ChangeNotifier {
 
   Future<void> _refresh() async {
     inspectionWarnings.clear();
+    // Loaded proxy credentials are an explicit read, not status evidence. The
+    // other manager may change them without changing this container's ports.
+    socks = null;
+    _socksReadTarget = null;
     server = {};
     try {
       server = await _active.run('status');
@@ -520,6 +526,7 @@ class WorkspaceController extends ChangeNotifier {
         'Server inspection failed. Protocol state is unknown; open Server activity for details.',
       );
     }
+    await _reconcileSocksStatus(server);
     clients = [];
     clientWarnings = [];
     clientsError = '';
@@ -641,11 +648,20 @@ class WorkspaceController extends ChangeNotifier {
   Future<void> _diagnose() async {
     message = 'Checking the actual server configuration…';
     diagnosticChecks = [];
-    final result = await _active.run('diagnostics');
+    socks = null;
+    _socksReadTarget = null;
+    final Map<String, dynamic> result;
+    try {
+      result = await _active.run('diagnostics');
+    } catch (_) {
+      await _reconcileSocksStatus(const {});
+      rethrow;
+    }
     diagnosticChecks = List<Map<String, dynamic>>.from(
       result['checks'] as List? ?? [],
     );
     if (diagnosticChecks.isEmpty) {
+      await _reconcileSocksStatus(const {});
       throw StateError(
         'Diagnostics returned no checks. The server has not been marked ready.',
       );
@@ -654,6 +670,11 @@ class WorkspaceController extends ChangeNotifier {
     if (actual?['server'] is Map) {
       server = Map<String, dynamic>.from(actual!['server'] as Map);
     }
+    await _reconcileSocksStatus(
+      actual?['server'] is Map
+          ? Map<String, dynamic>.from(actual!['server'] as Map)
+          : const {},
+    );
     if (actual?['security'] is Map) {
       security = Map<String, dynamic>.from(actual!['security'] as Map);
       securityError = '';
@@ -1382,6 +1403,7 @@ class WorkspaceController extends ChangeNotifier {
               'Final diagnostics failed: ${failed.map((c) => c["id"]).join(", ")}. Review diagnostics before retrying.',
             );
           }
+          if (answers.installSocks) await _readSocks();
         },
       ),
     ];
@@ -1713,8 +1735,79 @@ class WorkspaceController extends ChangeNotifier {
     message = 'Existing configuration saved. Its key and VPN access were not changed.';
   });
 
+  bool _sameSocksTarget(
+    ({String? containerId, String? source, int port})? target,
+    Map<String, dynamic> actual,
+  ) =>
+      target != null &&
+      target.containerId != null &&
+      target.source != null &&
+      actual['socks5'] == true &&
+      actual['socks5_access'] == 'private' &&
+      actual['socks5_private_supported'] != false &&
+      actual['socks5_error'] == null &&
+      actual['socks5_container_id'] == target.containerId &&
+      actual['socks5_source'] == target.source &&
+      actual['socks5_port'] == target.port;
+
+  Future<void> _closeSocksTunnel() async {
+    final previous = socksTunnel;
+    socksTunnel = null;
+    _socksTunnelTarget = null;
+    await previous?.close();
+  }
+
+  /// Keep the tunnel only when fresh non-secret evidence identifies its target.
+  Future<void> _reconcileSocksStatus(Map<String, dynamic> actual) async {
+    if (socksTunnel != null && !_sameSocksTarget(_socksTunnelTarget, actual)) {
+      await _closeSocksTunnel();
+    }
+  }
+
   Future<void> _readSocks() async {
-    final result = await _active.run('socks-info');
+    socks = null;
+    _socksReadTarget = null;
+    final Map<String, dynamic> result;
+    try {
+      result = await _active.run('socks-info');
+      final port = result['port'];
+      if (port is! int ||
+          port < 1 ||
+          port > 65535 ||
+          result['user'] is! String ||
+          result['password'] is! String ||
+          !{'public', 'private'}.contains(result['access'] ?? 'public')) {
+        throw const FormatException(
+          'The SOCKS5 connection details are invalid.',
+        );
+      }
+    } catch (_) {
+      await _closeSocksTunnel();
+      rethrow;
+    }
+    final containerId = result['container_id'];
+    final source = result['source'];
+    _socksReadTarget = (
+      containerId:
+          containerId is String &&
+              RegExp(r'^[a-f0-9]{64}$').hasMatch(containerId)
+          ? containerId
+          : null,
+      source: source is String && source.isNotEmpty ? source : null,
+      port: result['port'] as int,
+    );
+    server['socks5_port'] = result['port'];
+    server['socks5_access'] = result['access'] ?? 'public';
+    server['socks5_container_id'] = _socksReadTarget!.containerId;
+    server['socks5_source'] = _socksReadTarget!.source;
+    server['socks5'] = true;
+    server['socks5_configured'] = true;
+    server.remove('socks5_error');
+    if (server['socks5_access'] == 'private') {
+      // The private info command already verified the daemon requirement.
+      server['socks5_private_supported'] = true;
+    }
+    await _reconcileSocksStatus(server);
     socks = ConnectionDetails(
       host: result['access'] == 'private' ? '127.0.0.1' : _login.host,
       port: result['access'] == 'private' && socksTunnel != null
@@ -1724,12 +1817,10 @@ class WorkspaceController extends ChangeNotifier {
       password: result['password'] as String,
     );
     _secrets.add(socks!.password);
-    server['socks5_access'] = result['access'] ?? 'public';
   }
 
   Future<bool> startSocksTunnel() => _guard(() async {
-    await socksTunnel?.close();
-    socksTunnel = null;
+    await _closeSocksTunnel();
     await _readSocks();
     if (server['socks5_access'] != 'private') {
       throw StateError('Select private SOCKS5 access first.');
@@ -1738,6 +1829,7 @@ class WorkspaceController extends ChangeNotifier {
       _active.connection.client,
       socks!.port,
     );
+    _socksTunnelTarget = _socksReadTarget;
     socks = ConnectionDetails(
       host: '127.0.0.1',
       port: socksTunnel!.port,
@@ -1748,8 +1840,7 @@ class WorkspaceController extends ChangeNotifier {
         'Private SOCKS5 tunnel is running on 127.0.0.1:${socksTunnel!.port}. Keep Ashapp connected.';
   });
   Future<bool> stopSocksTunnel() => _guard(() async {
-    await socksTunnel?.close();
-    socksTunnel = null;
+    await _closeSocksTunnel();
     socks = null;
     message = 'Private SOCKS5 tunnel stopped.';
   });
@@ -1774,8 +1865,8 @@ class WorkspaceController extends ChangeNotifier {
       );
     }
     _secrets.add(password);
-    await socksTunnel?.close();
-    socksTunnel = null;
+    await _closeSocksTunnel();
+    socks = null;
     await _active.run('dependencies');
     await _active.run('socks-install', [
       '$port',
@@ -1785,11 +1876,11 @@ class WorkspaceController extends ChangeNotifier {
       access,
     ]);
     await _active.run('socks-check');
-    await _readSocks();
     await _refresh();
     if ((security?['firewall'] as Map?)?['managed'] == true) {
       await _securityApply({'firewall': true});
     }
+    await _readSocks();
     message = 'SOCKS5 credentials verified. AmneziaVPN caches credentials locally; update or re-add its SOCKS5 connection to use the new access.';
   });
   Future<bool> service(String kind, String operation) => _guard(() async {

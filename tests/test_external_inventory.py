@@ -87,7 +87,7 @@ class ExternalInventoryTests(unittest.TestCase):
         def run(args, data=None, check=True):
             if args[:2] == ['docker', 'exec']:
                 return result('users synthetic:CL:synthetic_placeholder\nsocks -p1080\n')
-            return result(json.dumps([{'HostConfig': {'PortBindings': {
+            return result(json.dumps([{'Id': 'a' * 64, 'HostConfig': {'PortBindings': {
                 '1080/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '9443'}]}}}]))
         with patch.object(clients, 'run', side_effect=run):
             self.assertEqual(clients.socks_info()['port'], 9443)

@@ -53,11 +53,11 @@ void main() {
       );
       expect(tester.widget<OutlinedButton>(start).onPressed, isNull);
       expect(find.textContaining('server loopback only'), findsNothing);
-      final replace = find.text('Manage SOCKS5 credentials');
+      final replace = find.text('Manage SOCKS5 proxy');
       await tester.ensureVisible(replace);
       await tester.tap(replace);
       await tester.pumpAndSettle();
-      expect(find.text('Replace SOCKS5 credentials'), findsOneWidget);
+      expect(find.text('Replace SOCKS5 proxy'), findsOneWidget);
       expect(h.server.calls.where((call) => call.$1 == 'socks-info'), isEmpty);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
